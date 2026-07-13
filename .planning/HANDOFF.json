@@ -1,0 +1,50 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-07-13T14:23:35.639Z",
+  "source": "auto-postool",
+  "partial": false,
+  "phase": null,
+  "phase_name": null,
+  "phase_dir": null,
+  "plan": null,
+  "task": null,
+  "total_tasks": null,
+  "status": "auto-checkpoint",
+  "completed_tasks": [],
+  "remaining_tasks": [],
+  "blockers": [],
+  "human_actions_pending": [],
+  "decisions": [],
+  "uncommitted_files": [
+    {
+      "status": "??",
+      "path": ".gitignore"
+    },
+    {
+      "status": "??",
+      "path": ".planning/"
+    },
+    {
+      "status": "??",
+      "path": "Insider-Buying-Dashboard-Build-Brief-20260713-V1_1.md"
+    },
+    {
+      "status": "??",
+      "path": "README.md"
+    },
+    {
+      "status": "??",
+      "path": "app/"
+    },
+    {
+      "status": "??",
+      "path": "dashboard.py"
+    },
+    {
+      "status": "??",
+      "path": "requirements.txt"
+    }
+  ],
+  "next_action": null,
+  "context_notes": ""
+}
