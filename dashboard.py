@@ -94,7 +94,7 @@ else:
                "days_since_first", "days_since_last", "roles"]]
     event = st.dataframe(
         show,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
@@ -141,7 +141,7 @@ else:
             view["trade_pct"] = pd.to_numeric(view["trade_pct"], errors="coerce")
             st.dataframe(
                 view,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "insider_name": st.column_config.TextColumn("Insider", width="medium"),
