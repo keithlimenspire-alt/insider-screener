@@ -23,6 +23,12 @@ WHERE t.transaction_code = 'P'          -- open-market purchase…
   AND t.transaction_date <= :as_of
   AND t.value IS NOT NULL AND t.value >= :min_value
   AND f.ticker IS NOT NULL AND f.ticker != ''
+  -- Debt securities occasionally appear on Form 4 with principal amounts in
+  -- both the shares and price fields, producing absurd value products —
+  -- the strategy is equity-only, so drop them.
+  AND lower(coalesce(t.security_title, '')) NOT LIKE '%note%'
+  AND lower(coalesce(t.security_title, '')) NOT LIKE '%bond%'
+  AND lower(coalesce(t.security_title, '')) NOT LIKE '%debenture%'
 """
 
 

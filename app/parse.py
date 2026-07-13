@@ -70,15 +70,21 @@ def parse_form4(submission_text: str) -> dict:
         "ticker": _find_text(root, "issuer/issuerTradingSymbol"),
     }
 
+    remarks = _find_text(root, "remarks")
     owners = []
     for ro in root.findall("reportingOwner"):
         rel = ro.find("reportingOwnerRelationship")
+        title = _find_text(rel, "officerTitle") if rel is not None else None
+        # Some filers put "See Remarks" in officerTitle with the real title
+        # in the top-level <remarks> element.
+        if title and title.strip().lower() == "see remarks" and remarks:
+            title = remarks
         owners.append({
             "cik": (_find_text(ro, "reportingOwnerId/rptOwnerCik") or "").lstrip("0") or None,
             "name": _find_text(ro, "reportingOwnerId/rptOwnerName"),
             "is_director": _flag(_find_text(rel, "isDirector")) if rel is not None else 0,
             "is_officer": _flag(_find_text(rel, "isOfficer")) if rel is not None else 0,
-            "officer_title": _find_text(rel, "officerTitle") if rel is not None else None,
+            "officer_title": title,
             "is_ten_percent_owner": _flag(_find_text(rel, "isTenPercentOwner")) if rel is not None else 0,
         })
 
