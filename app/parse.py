@@ -3,6 +3,10 @@ import re
 import xml.etree.ElementTree as ET
 
 _XML_BLOCK = re.compile(r"<XML>(.*?)</XML>", re.DOTALL | re.IGNORECASE)
+# Pointer-only placeholder titles ("See Remarks", "See Remarks*", "See remarks below.")
+# whose real value lives in the top-level <remarks> element.
+_SEE_REMARKS_RE = re.compile(r"^see\s+remarks(\s+below)?\W*$", re.IGNORECASE)
+_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
 
 
 class Form4ParseError(Exception):
@@ -35,6 +39,15 @@ def _value(root: ET.Element, path: str) -> str | None:
     if el is None:
         return None
     return _text(el.find("value"))
+
+
+def _date(s: str | None) -> str | None:
+    """Normalize xs:date to YYYY-MM-DD — filers sometimes append a timezone
+    offset ("2026-05-29-05:00") that breaks date math downstream."""
+    if s is None:
+        return None
+    m = _DATE_RE.match(s.strip())
+    return m.group(1) if m else s
 
 
 def _num(s: str | None) -> float | None:
@@ -75,9 +88,7 @@ def parse_form4(submission_text: str) -> dict:
     for ro in root.findall("reportingOwner"):
         rel = ro.find("reportingOwnerRelationship")
         title = _find_text(rel, "officerTitle") if rel is not None else None
-        # Some filers put "See Remarks" in officerTitle with the real title
-        # in the top-level <remarks> element.
-        if title and title.strip().lower() == "see remarks" and remarks:
+        if title and remarks and _SEE_REMARKS_RE.match(title.strip()):
             title = remarks
         owners.append({
             "cik": (_find_text(ro, "reportingOwnerId/rptOwnerCik") or "").lstrip("0") or None,
@@ -101,7 +112,7 @@ def parse_form4(submission_text: str) -> dict:
                 "txn_seq": seq,
                 "is_derivative": is_derivative,
                 "security_title": _value(tx, "securityTitle"),
-                "transaction_date": _value(tx, "transactionDate"),
+                "transaction_date": _date(_value(tx, "transactionDate")),
                 "transaction_code": _find_text(tx, "transactionCoding/transactionCode"),
                 "acquired_disposed": _value(tx, "transactionAmounts/transactionAcquiredDisposedCode"),
                 "shares": shares,
@@ -116,7 +127,7 @@ def parse_form4(submission_text: str) -> dict:
 
     return {
         "document_type": _find_text(root, "documentType"),
-        "period_of_report": _find_text(root, "periodOfReport"),
+        "period_of_report": _date(_find_text(root, "periodOfReport")),
         "issuer": issuer,
         "owners": owners,
         "txns": txns,

@@ -7,12 +7,18 @@ Usage:
 """
 import argparse
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 
 from . import config, db, edgar, parse
 
 log = logging.getLogger("ingest")
+
+# Self-reported issuerTradingSymbol is unreliable ('NYSE: KRC', '(SIRI)',
+# 'BFA, BFB', foreign symbols). Accept it only when the CIK is missing from
+# SEC's canonical map AND the string actually looks like a US ticker.
+_TICKER_RE = re.compile(r"[A-Z]{1,5}([.-][A-Z0-9]{1,3})?")
 
 
 def _fetch_and_parse(accession_no: str, path: str) -> tuple[str, dict | None, str | None]:
@@ -28,9 +34,10 @@ def _rows_for(accession_no: str, filed_at: str, parsed: dict,
               ticker_map: dict[str, str]) -> tuple[dict, list[dict]]:
     issuer = parsed["issuer"]
     cik = issuer["cik"] or ""
-    ticker = (issuer["ticker"] or "").strip().upper()
-    if not ticker or ticker in ("NONE", "N/A"):
-        ticker = ticker_map.get(cik, "") or None
+    raw_symbol = (issuer["ticker"] or "").strip().upper()
+    ticker = ticker_map.get(cik) or (
+        raw_symbol if _TICKER_RE.fullmatch(raw_symbol) else None
+    )
     acc_nodash = accession_no.replace("-", "")
     filing = {
         "accession_no": accession_no,
@@ -45,6 +52,11 @@ def _rows_for(accession_no: str, filed_at: str, parsed: dict,
         "cik": None, "name": None, "is_director": 0, "is_officer": 0,
         "officer_title": None, "is_ten_percent_owner": 0,
     }]
+    # A filing occasionally lists the same owner CIK twice, which would violate
+    # UNIQUE(accession_no, txn_seq, insider_cik) — keep the first occurrence.
+    seen: set = set()
+    owners = [o for o in owners
+              if o["cik"] is None or (o["cik"] not in seen and not seen.add(o["cik"]))]
     rows = []
     for txn in parsed["txns"]:
         for owner in owners:
@@ -72,7 +84,7 @@ def ingest_day(conn, day: date, ticker_map: dict[str, str],
     if not force and db.day_ingested(conn, day_str):
         log.info("%s already ingested — skipping", day_str)
         return
-    idx_text = edgar.fetch_form_index(day)
+    idx_text = edgar.fetch_form_index(day, force=force)
     accessions = edgar.form4_accessions(idx_text)
     todo = {a: p for a, p in accessions.items() if force or not db.filing_exists(conn, a)}
     if limit is not None:
@@ -88,13 +100,20 @@ def ingest_day(conn, day: date, ticker_map: dict[str, str],
                 n_err += 1
                 log.warning("  %s failed: %s", accession_no, err)
                 continue
-            filing, rows = _rows_for(accession_no, day_str, parsed, ticker_map)
-            db.upsert_filing(conn, filing, rows)
+            try:
+                filing, rows = _rows_for(accession_no, day_str, parsed, ticker_map)
+                db.upsert_filing(conn, filing, rows)
+            except Exception as e:
+                n_err += 1
+                log.warning("  %s db upsert failed: %s: %s", accession_no, type(e).__name__, e)
+                continue
             if i % 100 == 0:
                 log.info("  %s: %d/%d done", day_str, i, len(todo))
 
-    # Only mark complete when the full day went in — partial (--limit) runs must re-run.
-    if limit is None and n_err == 0:
+    # Only mark complete when the full day went in cleanly AND the index has
+    # stopped changing (EDGAR rewrites recent daily indexes) — otherwise the
+    # day re-runs cheaply on the next ingest until it is final.
+    if limit is None and n_err == 0 and edgar.index_is_final(day):
         db.mark_day_ingested(conn, day_str, len(accessions))
     elif n_err:
         log.warning("%s: %d filings failed — day left unmarked for retry", day_str, n_err)

@@ -1,9 +1,11 @@
 """SEC EDGAR fetch layer: rate-limited, cached, compliant User-Agent."""
 import json
 import logging
+import os
 import re
 import time
-from datetime import date
+from datetime import date, timedelta
+from pathlib import Path
 
 import requests
 
@@ -23,10 +25,18 @@ RETRY_STATUSES = {403, 429, 500, 502, 503, 504}
 
 
 def fetch(url: str, max_retries: int = 4) -> bytes:
-    """Rate-limited GET with exponential backoff on SEC throttling responses."""
+    """Rate-limited GET with exponential backoff on throttling and transport errors."""
     for attempt in range(max_retries + 1):
         _limiter.acquire()
-        resp = _session.get(url, timeout=30)
+        try:
+            resp = _session.get(url, timeout=30)
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries:
+                wait = 2 ** attempt
+                log.warning("%s for %s — retrying in %ss", type(e).__name__, url, wait)
+                time.sleep(wait)
+                continue
+            raise
         if resp.status_code == 200:
             return resp.content
         if resp.status_code in RETRY_STATUSES and attempt < max_retries:
@@ -36,6 +46,15 @@ def fetch(url: str, max_retries: int = 4) -> bytes:
             continue
         resp.raise_for_status()
     raise RuntimeError(f"unreachable: {url}")
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    """Write-to-temp-then-rename so a killed process never leaves a truncated
+    cache file at the final path (the .exists() checks would trust it forever)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
 
 
 # ---------------------------------------------------------------- daily index
@@ -71,16 +90,26 @@ def available_index_days(d_from: date, d_to: date) -> list[date]:
     return sorted(days)
 
 
-def fetch_form_index(day: date) -> str:
-    """Fetch (and cache — past days are immutable) one daily form index."""
+# EDGAR rewrites a day's index for up to ~2 days after first publication,
+# so a cached copy is only trustworthy once it was fetched that far after.
+INDEX_FINAL_AFTER_DAYS = 2
+
+
+def index_is_final(day: date, as_of: date | None = None) -> bool:
+    return (as_of or date.today()) >= day + timedelta(days=INDEX_FINAL_AFTER_DAYS)
+
+
+def fetch_form_index(day: date, force: bool = False) -> str:
+    """Fetch one daily form index, cached once the index has stopped changing."""
     cache_file = config.INDEX_CACHE_DIR / f"form.{day:%Y%m%d}.idx"
-    if cache_file.exists():
-        return cache_file.read_text(encoding="utf-8", errors="replace")
+    if cache_file.exists() and not force:
+        fetched_on = date.fromtimestamp(cache_file.stat().st_mtime)
+        if index_is_final(day, as_of=fetched_on):
+            return cache_file.read_text(encoding="utf-8", errors="replace")
     url = f"{config.DAILY_INDEX_BASE}/{day.year}/QTR{quarter_of(day)}/form.{day:%Y%m%d}.idx"
-    text = fetch(url).decode("utf-8", errors="replace")
-    cache_file.parent.mkdir(parents=True, exist_ok=True)
-    cache_file.write_text(text, encoding="utf-8")
-    return text
+    data = fetch(url)
+    _atomic_write(cache_file, data)
+    return data.decode("utf-8", errors="replace")
 
 
 _IDX_ROW = re.compile(r"edgar/data/(\d+)/(\d{10}-\d{2}-\d{6})\.txt")
@@ -110,10 +139,9 @@ def fetch_accession(accession_no: str, path: str) -> str:
     cache_file = config.RAW_CACHE_DIR / f"{accession_no}.txt"
     if cache_file.exists():
         return cache_file.read_text(encoding="utf-8", errors="replace")
-    text = fetch(config.SEC_ARCHIVES_BASE + path).decode("utf-8", errors="replace")
-    cache_file.parent.mkdir(parents=True, exist_ok=True)
-    cache_file.write_text(text, encoding="utf-8")
-    return text
+    data = fetch(config.SEC_ARCHIVES_BASE + path)
+    _atomic_write(cache_file, data)
+    return data.decode("utf-8", errors="replace")
 
 
 # ---------------------------------------------------------------- ticker maps
@@ -122,19 +150,24 @@ def load_ticker_map(max_age_hours: float = 24.0) -> dict[str, str]:
     """CIK (no leading zeros, as str) → ticker, from SEC's company_tickers.json."""
     cache_file = config.CACHE_DIR / "company_tickers.json"
     if not cache_file.exists() or (time.time() - cache_file.stat().st_mtime) > max_age_hours * 3600:
-        cache_file.parent.mkdir(parents=True, exist_ok=True)
-        cache_file.write_bytes(fetch(config.COMPANY_TICKERS_URL))
+        _atomic_write(cache_file, fetch(config.COMPANY_TICKERS_URL))
     data = json.loads(cache_file.read_text(encoding="utf-8"))
     return {str(row["cik_str"]): row["ticker"] for row in data.values()}
 
 
-def load_exchange_map(max_age_hours: float = 24.0) -> dict[str, str]:
-    """Ticker → exchange (NYSE/Nasdaq/CBOE/OTC...), for the exclude-OTC filter."""
+def load_cik_exchange_map(max_age_hours: float = 24.0) -> dict[str, str]:
+    """CIK (no leading zeros, as str) → exchange (NYSE/Nasdaq/CBOE/OTC), for the
+    exclude-OTC filter. Keyed by CIK because filer-typed ticker symbols routinely
+    differ from SEC's canonical forms (BRK.B vs BRK-B, 'NYSE: KRC', ...)."""
     cache_file = config.CACHE_DIR / "company_tickers_exchange.json"
     if not cache_file.exists() or (time.time() - cache_file.stat().st_mtime) > max_age_hours * 3600:
-        cache_file.parent.mkdir(parents=True, exist_ok=True)
-        cache_file.write_bytes(fetch(config.COMPANY_TICKERS_EXCHANGE_URL))
+        _atomic_write(cache_file, fetch(config.COMPANY_TICKERS_EXCHANGE_URL))
     data = json.loads(cache_file.read_text(encoding="utf-8"))
     fields = data["fields"]  # ["cik","name","ticker","exchange"]
-    i_ticker, i_exch = fields.index("ticker"), fields.index("exchange")
-    return {row[i_ticker]: (row[i_exch] or "") for row in data["data"] if row[i_ticker]}
+    i_cik, i_exch = fields.index("cik"), fields.index("exchange")
+    out: dict[str, str] = {}
+    for row in data["data"]:
+        cik, exch = str(row[i_cik]), row[i_exch] or ""
+        if exch and not out.get(cik):  # first non-empty exchange per CIK wins
+            out[cik] = exch
+    return out

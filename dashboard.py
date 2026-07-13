@@ -32,9 +32,9 @@ def get_ticker_txns(ticker: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600)
-def get_exchange_map() -> dict:
+def get_cik_exchange_map() -> dict:
     try:
-        return edgar.load_exchange_map()
+        return edgar.load_cik_exchange_map()
     except Exception:
         return {}
 
@@ -60,7 +60,10 @@ min_value = st.sidebar.number_input("Min single-buy value ($)", min_value=0,
                                     help="§2: screen by dollar value, not shares")
 min_cluster = st.sidebar.slider("Min insiders in cluster", 1, 5, config.DEFAULT_MIN_CLUSTER_SIZE,
                                 help="§2–§3: ≥2 to screen, ≥3 ranks higher")
-exclude_otc = st.sidebar.checkbox("Exclude OTC / unlisted", value=True)
+exclude_otc = st.sidebar.checkbox(
+    "Exclude OTC", value=True,
+    help="Drops issuers SEC classifies as OTC (matched by CIK). Issuers absent "
+         "from SEC's exchange file are kept — absence is not proof of OTC.")
 
 stats = db_stats()
 st.sidebar.divider()
@@ -78,10 +81,10 @@ st.caption("Open-market insider purchases (Form 4, code P/A, non-derivative) "
 df = get_clusters(window_days, float(min_value), min_cluster)
 
 if exclude_otc and not df.empty:
-    exch = get_exchange_map()
+    exch = get_cik_exchange_map()
     if exch:
-        listed = df["ticker"].map(lambda t: exch.get(t, "")).str.upper()
-        df = df[listed.isin(["NYSE", "NASDAQ", "CBOE", "NYSE MKT", "NYSE ARCA"])]
+        exchange = df["cik"].map(lambda c: exch.get(str(c), "").upper())
+        df = df[exchange != "OTC"].copy()
 
 if df.empty:
     st.info("No clusters match the current filters. Widen the window, lower the "

@@ -31,7 +31,7 @@ EDGE_CASE_DOC = wrap("""<?xml version="1.0"?>
     </reportingOwnerId>
     <reportingOwnerRelationship>
       <isOfficer>true</isOfficer>
-      <officerTitle>See Remarks</officerTitle>
+      <officerTitle>See Remarks*</officerTitle>
     </reportingOwnerRelationship>
   </reportingOwner>
   <reportingOwner>
@@ -48,7 +48,7 @@ EDGE_CASE_DOC = wrap("""<?xml version="1.0"?>
   <nonDerivativeTable>
     <nonDerivativeTransaction>
       <securityTitle><value>Common Stock</value></securityTitle>
-      <transactionDate><value>2026-06-30</value></transactionDate>
+      <transactionDate><value>2026-06-30-05:00</value></transactionDate>
       <deemedExecutionDate></deemedExecutionDate>
       <transactionCoding>
         <transactionFormType>4</transactionFormType>
@@ -125,12 +125,13 @@ def test_edge_case_doc():
     assert len(p["owners"]) == 2
     o1, o2 = p["owners"]
     assert o1["is_officer"] == 1                       # 'true' accepted
-    assert o1["officer_title"] == "Chief Legal Officer"  # See Remarks resolved
+    assert o1["officer_title"] == "Chief Legal Officer"  # 'See Remarks*' resolved
     assert o1["is_director"] == 0                      # missing flag -> 0
     assert o2["is_ten_percent_owner"] == 1             # '1' accepted
     assert o2["officer_title"] is None                 # empty element -> None
     assert len(p["txns"]) == 1, "holding row must not count as a transaction"
     t = p["txns"][0]
+    assert t["transaction_date"] == "2026-06-30"       # tz suffix stripped
     assert t["transaction_code"] == "P" and t["acquired_disposed"] == "A"
     assert t["shares"] == 1034.50                      # decimal shares
     assert t["price_per_share"] is None                # footnote-only price

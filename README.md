@@ -57,6 +57,17 @@ To refresh daily, re-run `--days 5` (skips already-ingested days) or schedule it
 | `app/clusters.py` | On-the-fly cluster queries + trade % |
 | `dashboard.py` | Streamlit UI |
 
+## Why not edgartools?
+
+Evaluated live (v5.42.0, 2026-07-13) per the brief. Its Form 4 parse is
+accurate, but: (a) `.obj()` issues an extra uncacheable `data.sec.gov` request
+per reporting owner, roughly doubling bulk request volume; (b) v5.42.0 wipes
+its persistent HTTP cache on every `import edgar` (two "one-time" cache-fix
+markers delete each other); (c) it pulls 43 dependencies / ~275 MB. The direct
+stdlib parse used here is ~150 lines, was validated against a 23-filing live
+edge-case audit, and keeps rate limiting and caching fully in our control.
+Revisit if the cache bug is fixed and bulk needs grow.
+
 ## Notes / gotchas (§9)
 
 - The daily index lists a Form 4 once per filer (issuer + each reporting

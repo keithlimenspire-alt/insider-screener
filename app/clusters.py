@@ -13,7 +13,7 @@ SELECT t.accession_no, t.txn_seq, t.n_owners, t.insider_name, t.insider_cik,
        t.is_director, t.is_officer, t.officer_title, t.is_ten_percent_owner,
        t.transaction_date, t.shares, t.price_per_share, t.value,
        t.shares_owned_after, t.direct_indirect, t.security_title,
-       f.ticker, f.company_name, f.filed_at, f.filing_url
+       f.ticker, f.cik, f.company_name, f.filed_at, f.filing_url
 FROM transactions t
 JOIN filings f ON f.accession_no = t.accession_no
 WHERE t.transaction_code = 'P'          -- open-market purchase…
@@ -34,7 +34,10 @@ WHERE t.transaction_code = 'P'          -- open-market purchase…
 
 def short_role(row) -> str:
     """Compact role label for display (weighting/scoring is Phase 2)."""
-    title = (row.get("officer_title") or "").lower()
+    raw = row.get("officer_title")
+    # NULL comes back as float NaN under pandas 3 str dtype — NaN is truthy,
+    # so `raw or ""` is not a safe guard here.
+    title = raw.lower() if isinstance(raw, str) else ""
     if row.get("is_officer"):
         if re.search(r"chief executive|(^|\W)ceo(\W|$)", title):
             return "CEO"
@@ -81,6 +84,7 @@ def compute_clusters(buys: pd.DataFrame, min_cluster: int, as_of: date | None = 
     insiders = buys.groupby("ticker").agg(
         n_insiders=("insider_cik", "nunique"),
         company=("company_name", "last"),
+        cik=("cik", "last"),
         first_buy=("transaction_date", "min"),
         last_buy=("transaction_date", "max"),
         roles=("role", lambda r: ", ".join(sorted(set(r)))),
