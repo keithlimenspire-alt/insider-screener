@@ -152,7 +152,12 @@ def load_ticker_map(max_age_hours: float = 24.0) -> dict[str, str]:
     if not cache_file.exists() or (time.time() - cache_file.stat().st_mtime) > max_age_hours * 3600:
         _atomic_write(cache_file, fetch(config.COMPANY_TICKERS_URL))
     data = json.loads(cache_file.read_text(encoding="utf-8"))
-    return {str(row["cik_str"]): row["ticker"] for row in data.values()}
+    # A CIK can appear multiple times (common stock, warrants, units...); the
+    # file lists the primary security first, so first occurrence wins.
+    out: dict[str, str] = {}
+    for row in data.values():
+        out.setdefault(str(row["cik_str"]), row["ticker"])
+    return out
 
 
 def load_cik_exchange_map(max_age_hours: float = 24.0) -> dict[str, str]:

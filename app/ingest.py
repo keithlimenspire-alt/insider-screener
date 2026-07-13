@@ -19,6 +19,9 @@ log = logging.getLogger("ingest")
 # 'BFA, BFB', foreign symbols). Accept it only when the CIK is missing from
 # SEC's canonical map AND the string actually looks like a US ticker.
 _TICKER_RE = re.compile(r"[A-Z]{1,5}([.-][A-Z0-9]{1,3})?")
+# Placeholder strings filers type when there is no public listing. These pass
+# the shape regex, so reject them explicitly.
+_TICKER_PLACEHOLDERS = {"NONE", "N/A", "NA"}
 
 
 def _fetch_and_parse(accession_no: str, path: str) -> tuple[str, dict | None, str | None]:
@@ -36,7 +39,9 @@ def _rows_for(accession_no: str, filed_at: str, parsed: dict,
     cik = issuer["cik"] or ""
     raw_symbol = (issuer["ticker"] or "").strip().upper()
     ticker = ticker_map.get(cik) or (
-        raw_symbol if _TICKER_RE.fullmatch(raw_symbol) else None
+        raw_symbol
+        if _TICKER_RE.fullmatch(raw_symbol) and raw_symbol not in _TICKER_PLACEHOLDERS
+        else None
     )
     acc_nodash = accession_no.replace("-", "")
     filing = {
