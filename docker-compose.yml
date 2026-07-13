@@ -1,0 +1,24 @@
+# Phase 4 always-on deployment (e.g. Docker on DigitalOcean).
+#   docker compose up -d
+# The dashboard serves on :8501; the ingest sidecar catches up once a day and
+# fires cluster alerts (data/alerts.jsonl). Both share ./data (SQLite in WAL
+# mode handles the single-writer/many-reader split).
+services:
+  dashboard:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  ingest:
+    build: .
+    command: >
+      sh -c "while true; do
+               python -m app.ingest --daily;
+               sleep 86400;
+             done"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

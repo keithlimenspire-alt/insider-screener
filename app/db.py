@@ -54,10 +54,31 @@ CREATE TABLE IF NOT EXISTS ingested_days (
     ingested_at  TEXT DEFAULT (datetime('now'))
 );
 
+-- Phase 4: alert state per ticker + append-only alert log.
+CREATE TABLE IF NOT EXISTS alert_state (
+    ticker      TEXT PRIMARY KEY,
+    n_insiders  INTEGER NOT NULL,
+    total_value REAL NOT NULL,
+    first_seen  TEXT NOT NULL,
+    last_seen   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS alerts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT NOT NULL DEFAULT (datetime('now')),
+    ticker      TEXT NOT NULL,
+    kind        TEXT NOT NULL,               -- new | expanded
+    n_insiders  INTEGER,
+    total_value REAL,
+    message     TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_txn_screen
     ON transactions (transaction_code, acquired_disposed, is_derivative, transaction_date);
 CREATE INDEX IF NOT EXISTS idx_txn_accession ON transactions (accession_no);
 CREATE INDEX IF NOT EXISTS idx_filings_ticker ON filings (ticker);
+-- Serves the option-exercise-trap and first-time-buyer correlated subqueries.
+CREATE INDEX IF NOT EXISTS idx_txn_insider ON transactions (insider_cik, transaction_code);
 """
 
 

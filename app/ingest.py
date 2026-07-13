@@ -4,6 +4,7 @@ Usage:
     python -m app.ingest --days 45          # backfill window ending today
     python -m app.ingest --date 2026-07-10  # one specific day
     python -m app.ingest --days 3 --limit 20  # smoke test
+    python -m app.ingest --daily            # Phase 4: catch-up ingest + alerts
 """
 import argparse
 import logging
@@ -128,11 +129,13 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Ingest SEC Form 4 filings into SQLite")
     ap.add_argument("--days", type=int, help="backfill this many calendar days ending today")
     ap.add_argument("--date", type=str, help="ingest a single day (YYYY-MM-DD)")
+    ap.add_argument("--daily", action="store_true",
+                    help="catch-up ingest (last 7 days) then run cluster alerts")
     ap.add_argument("--limit", type=int, help="max accessions per day (testing)")
     ap.add_argument("--force", action="store_true", help="re-ingest even if already done")
     args = ap.parse_args()
-    if not args.days and not args.date:
-        ap.error("provide --days or --date")
+    if not args.days and not args.date and not args.daily:
+        ap.error("provide --days, --date, or --daily")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     conn = db.connect()
@@ -142,11 +145,18 @@ def main() -> None:
         days = [date.fromisoformat(args.date)]
     else:
         today = date.today()
-        days = edgar.available_index_days(today - timedelta(days=args.days), today)
+        span = 7 if args.daily else args.days
+        days = edgar.available_index_days(today - timedelta(days=span), today)
     log.info("ingesting %d day(s)", len(days))
     for d in days:
         ingest_day(conn, d, ticker_map, limit=args.limit, force=args.force)
     log.info("done")
+
+    if args.daily:
+        from . import alerts
+        fired = alerts.check_alerts(conn)
+        for a in fired:
+            print("ALERT:", a["message"])
 
 
 if __name__ == "__main__":

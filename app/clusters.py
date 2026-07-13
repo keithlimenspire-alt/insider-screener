@@ -1,6 +1,6 @@
-"""Cluster computation (strategy §2): group qualifying open-market buys per ticker.
-
-Clusters are computed on the fly from SQLite so the rolling window stays fresh.
+"""Strategy engine: qualifying buys and clusters (§2), judgement layer (§4–§5),
+and context signals (§3). Everything is computed on the fly from SQLite so the
+rolling window stays fresh.
 """
 import re
 import sqlite3
@@ -8,12 +8,34 @@ from datetime import date, timedelta
 
 import pandas as pd
 
+from . import config
+
 QUALIFYING_BUYS_SQL = """
 SELECT t.accession_no, t.txn_seq, t.n_owners, t.insider_name, t.insider_cik,
        t.is_director, t.is_officer, t.officer_title, t.is_ten_percent_owner,
        t.transaction_date, t.shares, t.price_per_share, t.value,
        t.shares_owned_after, t.direct_indirect, t.security_title,
-       f.ticker, f.cik, f.company_name, f.filed_at, f.filing_url
+       f.ticker, f.cik, f.company_name, f.filed_at, f.filing_url,
+       -- §5/§6 option-exercise trap ("the Starbucks trap"): the same insider
+       -- filed both an M (exercise) and an S (sale) line on the same day this
+       -- buy was filed — the "buy" is likely exercise-related, not conviction.
+       (EXISTS (SELECT 1 FROM transactions m
+                JOIN filings mf ON mf.accession_no = m.accession_no
+                WHERE m.insider_cik = t.insider_cik AND mf.filed_at = f.filed_at
+                  AND m.transaction_code = 'M')
+        AND
+        EXISTS (SELECT 1 FROM transactions s
+                JOIN filings sf ON sf.accession_no = s.accession_no
+                WHERE s.insider_cik = t.insider_cik AND sf.filed_at = f.filed_at
+                  AND s.transaction_code = 'S')) AS exercise_flag,
+       -- §3 first-time buyer: no open-market buy of this issuer on record
+       -- before the current window. Only as good as accumulated DB history.
+       (NOT EXISTS (SELECT 1 FROM transactions p
+                JOIN filings pf ON pf.accession_no = p.accession_no
+                WHERE p.insider_cik = t.insider_cik AND pf.cik = f.cik
+                  AND p.transaction_code = 'P' AND p.acquired_disposed = 'A'
+                  AND p.is_derivative = 0
+                  AND p.transaction_date < :cutoff)) AS first_time
 FROM transactions t
 JOIN filings f ON f.accession_no = t.accession_no
 WHERE t.transaction_code = 'P'          -- open-market purchase…
@@ -32,8 +54,10 @@ WHERE t.transaction_code = 'P'          -- open-market purchase…
 """
 
 
+# ------------------------------------------------------------------ roles §4
+
 def short_role(row) -> str:
-    """Compact role label for display (weighting/scoring is Phase 2)."""
+    """Compact role label for display and weighting."""
     raw = row.get("officer_title")
     # NULL comes back as float NaN under pandas 3 str dtype — NaN is truthy,
     # so `raw or ""` is not a safe guard here.
@@ -60,25 +84,83 @@ def short_role(row) -> str:
     return "Other"
 
 
+def role_weight(label: str) -> float:
+    w = config.ROLE_WEIGHTS.get(label)
+    if w is None and re.fullmatch(r"C[A-Z]O", label or ""):
+        w = config.ROLE_WEIGHTS["C?O"]
+    return w if w is not None else config.ROLE_WEIGHTS["Other"]
+
+
+def _add_trade_pct(df: pd.DataFrame) -> pd.DataFrame:
+    """Trade % (§3–§4): shares traded relative to holdings *before* the trade.
+    Left blank when prior holdings are zero (new position) or unknown."""
+    prior = df["shares_owned_after"] - df["shares"]
+    df["trade_pct"] = None
+    buy_mask = (df["acquired_disposed"] == "A") & (prior > 0) & df["shares"].notna()
+    df.loc[buy_mask, "trade_pct"] = (df.loc[buy_mask, "shares"] / prior[buy_mask]) * 100
+    df["trade_pct"] = pd.to_numeric(df["trade_pct"], errors="coerce")
+    return df
+
+
+# --------------------------------------------------------------- load buys
+
 def load_qualifying_buys(conn: sqlite3.Connection, window_days: int,
                          min_value: float, as_of: date | None = None) -> pd.DataFrame:
+    """Qualifying open-market buys in-window, with per-row judgement columns."""
     as_of = as_of or date.today()
     cutoff = as_of - timedelta(days=window_days)
     df = pd.read_sql_query(QUALIFYING_BUYS_SQL, conn, params={
         "cutoff": cutoff.isoformat(), "as_of": as_of.isoformat(), "min_value": min_value,
     })
-    if not df.empty:
-        df["role"] = df.apply(short_role, axis=1)
+    if df.empty:
+        return df
+    df["acquired_disposed"] = "A"  # column not selected; needed by _add_trade_pct
+    df = _add_trade_pct(df)
+    df["role"] = df.apply(short_role, axis=1)
+    df["role_weight"] = df["role"].map(role_weight)
+    # §4 conviction bands (on the economic trade value)
+    lo, hi = config.NOISE_BAND
+    df["conviction"] = ""
+    df.loc[df["value"].between(lo, hi), "conviction"] = "noise"
+    df.loc[df["value"] >= config.CONVICTION_MIN_VALUE, "conviction"] = "conviction"
+    # §5 fund noise: 10%-owner buying a tiny fraction of an existing stake
+    df["fund_noise"] = (
+        (df["is_ten_percent_owner"] == 1)
+        & df["trade_pct"].notna()
+        & (df["trade_pct"] < config.FUND_NOISE_MAX_TRADE_PCT)
+    )
     return df
 
 
-def compute_clusters(buys: pd.DataFrame, min_cluster: int, as_of: date | None = None) -> pd.DataFrame:
+def ticker_buy_months(conn: sqlite3.Connection) -> dict[str, int]:
+    """§3 routine detection input: distinct calendar months with any open-market
+    buy, per ticker, over the whole stored history."""
+    rows = conn.execute("""
+        SELECT f.ticker, COUNT(DISTINCT substr(t.transaction_date, 1, 7))
+        FROM transactions t JOIN filings f ON f.accession_no = t.accession_no
+        WHERE t.transaction_code = 'P' AND t.acquired_disposed = 'A'
+          AND t.is_derivative = 0 AND f.ticker IS NOT NULL AND f.ticker != ''
+        GROUP BY f.ticker""").fetchall()
+    return dict(rows)
+
+
+# ----------------------------------------------------------------- clusters
+
+def compute_clusters(buys: pd.DataFrame, min_cluster: int,
+                     as_of: date | None = None,
+                     routine_months: dict[str, int] | None = None,
+                     excluded_counts: dict[str, int] | None = None) -> pd.DataFrame:
     """One row per ticker with >= min_cluster distinct insiders buying in-window."""
     if buys.empty:
         return pd.DataFrame()
     as_of = as_of or date.today()
+    routine_months = routine_months or {}
+    excluded_counts = excluded_counts or {}
 
-    # Joint filings repeat one economic trade per owner — dedupe for money math.
+    # Joint filings repeat one economic trade per owner — dedupe for money math,
+    # but let any owner's fund-noise flag mark the trade.
+    trade_noise = buys.groupby(["accession_no", "txn_seq"])["fund_noise"].transform("max")
+    buys = buys.assign(trade_fund_noise=trade_noise)
     unique_trades = buys.drop_duplicates(subset=["accession_no", "txn_seq"])
 
     insiders = buys.groupby("ticker").agg(
@@ -88,20 +170,81 @@ def compute_clusters(buys: pd.DataFrame, min_cluster: int, as_of: date | None = 
         first_buy=("transaction_date", "min"),
         last_buy=("transaction_date", "max"),
         roles=("role", lambda r: ", ".join(sorted(set(r)))),
+        max_trade_pct=("trade_pct", "max"),
     )
+    # §4 role score: each distinct insider contributes their best role weight.
+    per_insider = buys.groupby(["ticker", "insider_cik"])["role_weight"].max()
+    insiders["role_score"] = per_insider.groupby("ticker").sum().round(2)
+    # §3 first-time buyers (distinct insiders whose first recorded buy is in-window)
+    ft = buys[buys["first_time"] == 1].groupby("ticker")["insider_cik"].nunique()
+    insiders["n_first_time"] = ft.reindex(insiders.index).fillna(0).astype(int)
+
     money = unique_trades.groupby("ticker").agg(
         total_value=("value", "sum"),
         largest_buy=("value", "max"),
         n_buys=("value", "size"),
+        n_conviction=("conviction", lambda c: (c == "conviction").sum()),
+        n_noise=("conviction", lambda c: (c == "noise").sum()),
     )
+    noise_value = (unique_trades[unique_trades["trade_fund_noise"]]
+                   .groupby("ticker")["value"].sum())
+    money["fund_noise_value"] = noise_value.reindex(money.index).fillna(0.0)
+
     out = insiders.join(money).reset_index()
     out = out[out["n_insiders"] >= min_cluster]
     if out.empty:
         return out
+
     out["days_since_first"] = (pd.Timestamp(as_of) - pd.to_datetime(out["first_buy"])).dt.days
     out["days_since_last"] = (pd.Timestamp(as_of) - pd.to_datetime(out["last_buy"])).dt.days
-    return out.sort_values(["n_insiders", "total_value"], ascending=False).reset_index(drop=True)
 
+    # §5 flags + §3 routine
+    out["fund_noise"] = out["fund_noise_value"] > 0.5 * out["total_value"]
+    out["stale"] = out["days_since_last"] > config.STALE_AFTER_DAYS
+    out["routine"] = out["ticker"].map(
+        lambda t: routine_months.get(t, 0) >= config.ROUTINE_MIN_DISTINCT_MONTHS)
+    out["n_exercise_excluded"] = out["ticker"].map(
+        lambda t: excluded_counts.get(t, 0)).astype(int)
+
+    def _flags(row) -> str:
+        f = []
+        if row["n_exercise_excluded"]:
+            f.append(f"exercise×{row['n_exercise_excluded']}")
+        if row["fund_noise"]:
+            f.append("fund-noise")
+        if row["stale"]:
+            f.append("stale")
+        if row["routine"]:
+            f.append("routine")
+        if row["n_noise"] and row["n_noise"] >= row["n_buys"]:
+            f.append("all-noise-sized")
+        return ", ".join(f)
+
+    out["flags"] = out.apply(_flags, axis=1)
+    return out.sort_values(["n_insiders", "role_score", "total_value"],
+                           ascending=False).reset_index(drop=True)
+
+
+def build_screen(conn: sqlite3.Connection, window_days: int, min_value: float,
+                 min_cluster: int, include_exercise_flagged: bool = False,
+                 as_of: date | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Full screener pipeline: load → exclude exercise-flagged (§5) → cluster.
+
+    Returns (clusters, kept_buys)."""
+    buys = load_qualifying_buys(conn, window_days, min_value, as_of=as_of)
+    if buys.empty:
+        return pd.DataFrame(), buys
+    excluded = buys[buys["exercise_flag"] == 1]
+    kept = buys if include_exercise_flagged else buys[buys["exercise_flag"] == 0]
+    excluded_counts = ({} if include_exercise_flagged else
+                       excluded.groupby("ticker")["insider_cik"].size().to_dict())
+    cl = compute_clusters(kept, min_cluster, as_of=as_of,
+                          routine_months=ticker_buy_months(conn),
+                          excluded_counts=excluded_counts)
+    return cl, kept
+
+
+# --------------------------------------------------------------- drill-down
 
 TICKER_TXNS_SQL = """
 SELECT t.insider_name, t.insider_cik, t.is_director, t.is_officer, t.officer_title,
@@ -122,10 +265,18 @@ def ticker_transactions(conn: sqlite3.Connection, ticker: str) -> pd.DataFrame:
     if df.empty:
         return df
     df["role"] = df.apply(short_role, axis=1)
-    # Trade % (§3–§4): shares bought relative to holdings *before* the buy.
-    # Left blank when prior holdings are zero (new position) or unknown.
-    prior = df["shares_owned_after"] - df["shares"]
-    df["trade_pct"] = None
-    buy_mask = (df["acquired_disposed"] == "A") & (prior > 0) & df["shares"].notna()
-    df.loc[buy_mask, "trade_pct"] = (df.loc[buy_mask, "shares"] / prior[buy_mask]) * 100
-    return df
+    return _add_trade_pct(df)
+
+
+def insider_buy_history(conn: sqlite3.Connection, ticker: str) -> pd.DataFrame:
+    """§3 track record input: every stored open-market buy of this ticker,
+    deduped to one row per economic trade (first listed owner)."""
+    df = pd.read_sql_query("""
+        SELECT t.insider_name, t.insider_cik, t.transaction_date, t.shares,
+               t.price_per_share, t.value, t.accession_no, t.txn_seq
+        FROM transactions t JOIN filings f ON f.accession_no = t.accession_no
+        WHERE f.ticker = :ticker AND t.transaction_code = 'P'
+          AND t.acquired_disposed = 'A' AND t.is_derivative = 0
+          AND t.price_per_share IS NOT NULL AND t.price_per_share > 0
+        ORDER BY t.transaction_date""", conn, params={"ticker": ticker})
+    return df.drop_duplicates(subset=["accession_no", "txn_seq"])
