@@ -87,6 +87,7 @@ def connect(db_path: Path = config.DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")  # writers queue instead of erroring
     conn.executescript(SCHEMA)
     return conn
 

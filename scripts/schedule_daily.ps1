@@ -1,5 +1,8 @@
 # Registers a Windows Task Scheduler job that runs the daily ingest + alerts
-# every evening at 22:30 (EDGAR's daily index for the day is posted ~22:05 ET).
+# every evening at 22:30 LOCAL time. EDGAR posts a trading day's index around
+# 22:05 US-Eastern (~10:05 next morning in Singapore); the exact run time
+# doesn't matter much because --daily catches up the last 7 days and keeps
+# re-ingesting recent days until their index is final.
 #
 # Run this yourself from an elevated-or-not PowerShell — it modifies YOUR
 # scheduled tasks, so it is not executed automatically by any tooling:

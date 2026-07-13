@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "timestamp": "2026-07-13T16:38:01.717Z",
+  "timestamp": "2026-07-13T16:43:18.998Z",
   "source": "auto-postool",
   "partial": false,
   "phase": null,
@@ -17,62 +17,18 @@
   "decisions": [],
   "uncommitted_files": [
     {
-      "status": "D",
-      "path": ".claude/scheduled_tasks.lock"
-    },
-    {
       "status": "M",
       "path": ".planning/HANDOFF.json"
     },
     {
       "status": "M",
-      "path": "app/clusters.py"
+      "path": "README.md"
     },
     {
       "status": "M",
-      "path": "app/config.py"
-    },
-    {
-      "status": "M",
-      "path": "app/db.py"
-    },
-    {
-      "status": "M",
-      "path": "app/ingest.py"
-    },
-    {
-      "status": "M",
-      "path": "dashboard.py"
-    },
-    {
-      "status": "M",
-      "path": "requirements.txt"
-    },
-    {
-      "status": "??",
-      "path": "Dockerfile"
-    },
-    {
-      "status": "??",
-      "path": "app/alerts.py"
-    },
-    {
-      "status": "??",
-      "path": "app/prices.py"
-    },
-    {
-      "status": "??",
-      "path": "docker-compose.yml"
-    },
-    {
-      "status": "??",
-      "path": "scripts/"
-    },
-    {
-      "status": "??",
-      "path": "tests/test_strategy.py"
+      "path": "scripts/schedule_daily.ps1"
     }
   ],
   "next_action": null,
-  "context_notes": "Recent commits:\nfe4b573 Reject ticker placeholders; primary listing wins in CIK-ticker map\n1e57aac Replace deprecated use_container_width with width=stretch\n91186ce Fix 12 confirmed review findings (7 distinct defects)\n2892c77 Handle real-world edge cases found by live filing audit\ncaba0f1 Phase 1 scaffold: SEC Form 4 ingest pipeline + Streamlit screener"
+  "context_notes": "Recent commits:\ne3305ee Phases 2-4: judgement layer, context layer, always-on\nfe4b573 Reject ticker placeholders; primary listing wins in CIK-ticker map\n1e57aac Replace deprecated use_container_width with width=stretch\n91186ce Fix 12 confirmed review findings (7 distinct defects)\n2892c77 Handle real-world edge cases found by live filing audit"
 }
