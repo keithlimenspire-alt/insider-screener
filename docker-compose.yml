@@ -14,8 +14,11 @@ services:
 
   ingest:
     build: .
+    # One-time 45-day backfill on first start (already-ingested days skip in
+    # seconds on restarts), then a daily catch-up + alerts loop.
     command: >
-      sh -c "while true; do
+      sh -c "python -m app.ingest --days 45;
+             while true; do
                python -m app.ingest --daily;
                sleep 86400;
              done"

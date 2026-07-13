@@ -48,6 +48,7 @@ STALE_AFTER_DAYS = 40                # §5: no follow-through for >5–6 weeks
 # Phase 3 — context layer (strategy §3)
 NEAR_HIGH_MAX_PCT_BELOW = 15.0       # §3: within 5–15% of multi-year high
 ROUTINE_MIN_DISTINCT_MONTHS = 3      # §3: buys recurring ~monthly = routine
+ROUTINE_LOOKBACK_DAYS = 365          # …counted in the year BEFORE the window
 PRICE_HISTORY_YEARS = 3              # trailing window for the multi-year high
 PRICE_CACHE_DIR = CACHE_DIR / "prices"
 PRICE_CACHE_TTL_HOURS = 20.0

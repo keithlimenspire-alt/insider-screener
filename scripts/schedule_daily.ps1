@@ -15,9 +15,13 @@ $action = New-ScheduledTaskAction -Execute "$root\scripts\daily_ingest.cmd"
 $trigger = New-ScheduledTaskTrigger -Daily -At 22:30
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
     -DontStopOnIdleEnd -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+# S4U principal: runs whether or not you are logged on, without storing a
+# password. (Default interactive-token tasks silently skip while logged off;
+# --daily's catch-up would heal the gap, but better not to create one.)
+$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U
 
 Register-ScheduledTask -TaskName "InsiderScreenerDaily" -Action $action `
-    -Trigger $trigger -Settings $settings `
+    -Trigger $trigger -Settings $settings -Principal $principal `
     -Description "SEC Form 4 daily ingest + insider-cluster alerts"
 
 Write-Host "Registered task 'InsiderScreenerDaily' (daily 22:30)."

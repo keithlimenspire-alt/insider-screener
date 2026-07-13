@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "timestamp": "2026-07-13T16:43:18.998Z",
+  "timestamp": "2026-07-13T17:08:13.842Z",
   "source": "auto-postool",
   "partial": false,
   "phase": null,
@@ -22,13 +22,49 @@
     },
     {
       "status": "M",
-      "path": "README.md"
+      "path": "app/alerts.py"
+    },
+    {
+      "status": "M",
+      "path": "app/clusters.py"
+    },
+    {
+      "status": "M",
+      "path": "app/config.py"
+    },
+    {
+      "status": "M",
+      "path": "app/ingest.py"
+    },
+    {
+      "status": "M",
+      "path": "app/prices.py"
+    },
+    {
+      "status": "M",
+      "path": "dashboard.py"
+    },
+    {
+      "status": "M",
+      "path": "docker-compose.yml"
+    },
+    {
+      "status": "M",
+      "path": "scripts/daily_ingest.cmd"
     },
     {
       "status": "M",
       "path": "scripts/schedule_daily.ps1"
+    },
+    {
+      "status": "M",
+      "path": "tests/test_strategy.py"
+    },
+    {
+      "status": "??",
+      "path": ".dockerignore"
     }
   ],
   "next_action": null,
-  "context_notes": "Recent commits:\ne3305ee Phases 2-4: judgement layer, context layer, always-on\nfe4b573 Reject ticker placeholders; primary listing wins in CIK-ticker map\n1e57aac Replace deprecated use_container_width with width=stretch\n91186ce Fix 12 confirmed review findings (7 distinct defects)\n2892c77 Handle real-world edge cases found by live filing audit"
+  "context_notes": "Recent commits:\nef848a3 Document Phases 2-4 in README; timezone-honest scheduler comment; busy_timeout\ne3305ee Phases 2-4: judgement layer, context layer, always-on\nfe4b573 Reject ticker placeholders; primary listing wins in CIK-ticker map\n1e57aac Replace deprecated use_container_width with width=stretch\n91186ce Fix 12 confirmed review findings (7 distinct defects)"
 }

@@ -16,11 +16,12 @@ st.set_page_config(page_title="Insider-Buying Screener", page_icon="📈", layou
 
 @st.cache_data(ttl=300)
 def get_screen(window_days: int, min_value: float, min_cluster: int,
-               include_exercise: bool) -> tuple[pd.DataFrame, pd.DataFrame]:
+               include_exercise: bool, solo_gc: bool) -> tuple[pd.DataFrame, pd.DataFrame]:
     conn = db.connect()
     try:
         return clusters.build_screen(conn, window_days, min_value, min_cluster,
-                                     include_exercise_flagged=include_exercise)
+                                     include_exercise_flagged=include_exercise,
+                                     include_solo_gc=solo_gc)
     finally:
         conn.close()
 
@@ -108,7 +109,11 @@ exclude_otc = st.sidebar.checkbox(
 include_exercise = st.sidebar.checkbox(
     "Include exercise-flagged buys", value=False,
     help="§5 Starbucks trap: buys by insiders who filed an option exercise (M) "
-         "and a sale (S) the same day are excluded by default.")
+         "and a sale (S) at this issuer the same day are excluded by default.")
+solo_gc = st.sidebar.checkbox(
+    "Include solo GC buys", value=True,
+    help="§4: a General Counsel buying is a high signal even alone — kept on "
+         "screen (flagged solo-GC) even below the cluster minimum.")
 
 st.sidebar.divider()
 st.sidebar.subheader("Market data (yfinance)")
@@ -141,13 +146,17 @@ if recent:
         for ts, ticker, kind, message in recent:
             st.write(f"`{ts}` **{kind}** — {message}")
 
-df, kept_buys = get_screen(window_days, float(min_value), min_cluster, include_exercise)
+df, kept_buys = get_screen(window_days, float(min_value), min_cluster,
+                           include_exercise, solo_gc)
 
 if exclude_otc and not df.empty:
     exch = get_cik_exchange_map()
     if exch:
         exchange = df["cik"].map(lambda c: exch.get(str(c), "").upper())
         df = df[exchange != "OTC"].copy()
+    else:
+        st.warning("SEC exchange data unavailable — the exclude-OTC filter is "
+                   "inactive this session.")
 
 if not df.empty and min_role_score > 0:
     df = df[df["role_score"] >= min_role_score].copy()
@@ -157,7 +166,8 @@ if not df.empty and cap_limit is not None:
     with st.spinner(f"Fetching market caps for {len(df)} tickers…"):
         caps = {t: get_market_cap(t) for t in df["ticker"]}
     df["market_cap"] = df["ticker"].map(caps)
-    df = df[df["market_cap"].notna() & (df["market_cap"] <= cap_limit)].copy()
+    # Unknown caps are kept — a Yahoo miss must not silently hide a cluster.
+    df = df[df["market_cap"].isna() | (df["market_cap"] <= cap_limit)].copy()
 
 if not df.empty and price_context:
     prog = st.progress(0.0, text="Fetching price history…")
@@ -177,11 +187,12 @@ if df.empty:
             "minimum value or role score, or ingest more days of filings.")
     st.stop()
 
-cols = ["ticker", "company", "n_insiders", "n_buys", "total_value", "largest_buy",
-        "role_score", "max_trade_pct", "n_conviction", "n_first_time",
+cols = ["ticker", "company", "n_insiders", "n_filers", "n_buys", "total_value",
+        "largest_buy", "role_score", "max_trade_pct", "n_conviction", "n_first_time",
         "days_since_first", "days_since_last", "roles", "flags"]
 if price_context:
-    cols.insert(2, "pct_below_high")
+    cols.insert(2, "near_high")
+    cols.insert(3, "pct_below_high")
 if cap_limit is not None:
     cols.insert(2, "market_cap")
 show = df[cols]
@@ -195,13 +206,22 @@ event = st.dataframe(
     column_config={
         "ticker": st.column_config.TextColumn("Ticker"),
         "company": st.column_config.TextColumn("Company", width="medium"),
-        "market_cap": st.column_config.NumberColumn("Mkt cap", format="$%.0f"),
+        "market_cap": st.column_config.NumberColumn(
+            "Mkt cap", format="$%.0f",
+            help="From Yahoo Finance; clusters with unknown caps stay visible."),
+        "near_high": st.column_config.CheckboxColumn(
+            "Near high",
+            help=f"§3: within {config.NEAR_HIGH_MAX_PCT_BELOW:.0f}% of the trailing "
+                 f"{config.PRICE_HISTORY_YEARS}-year high"),
         "pct_below_high": st.column_config.NumberColumn(
             "% below high", format="%.1f%%",
-            help=f"§3: distance below the trailing {config.PRICE_HISTORY_YEARS}-year high; "
-                 f"within {config.NEAR_HIGH_MAX_PCT_BELOW:.0f}% counts as near-high"),
+            help=f"§3: distance below the trailing {config.PRICE_HISTORY_YEARS}-year high"),
         "n_insiders": st.column_config.NumberColumn(
-            "# insiders", help="Distinct insiders with qualifying buys in the window"),
+            "# insiders",
+            help="Independent buying units: co-filers of one joint Form 4 (a fund "
+                 "family) count once. '# filers' shows the raw entity count."),
+        "n_filers": st.column_config.NumberColumn(
+            "# filers", help="Raw distinct reporting-owner CIKs, joint co-filers included"),
         "n_buys": st.column_config.NumberColumn("# buys"),
         "total_value": st.column_config.NumberColumn("Total $", format="$%.0f"),
         "largest_buy": st.column_config.NumberColumn("Largest buy", format="$%.0f"),
@@ -224,11 +244,13 @@ event = st.dataframe(
         "roles": st.column_config.TextColumn("Roles", width="medium"),
         "flags": st.column_config.TextColumn(
             "Flags", width="medium",
-            help="§5: exercise×N = N buys excluded for same-day M+S · fund-noise = "
-                 ">50% of $ from 10%-owners buying <2% of their stake · stale = last "
-                 f"buy >{config.STALE_AFTER_DAYS}d ago · routine = buys in "
-                 f"≥{config.ROUTINE_MIN_DISTINCT_MONTHS} distinct months on record · "
-                 "all-noise-sized = every buy in the $3k–$15k 401(k)/ESPP band"),
+            help="solo-GC = General Counsel buying alone (§4 keeps it) · "
+                 "exercise×N = N trades excluded for same-day M+S (§5) · fund-noise = "
+                 ">50% of $ from 10%-owners buying <2% of their stake (§5) · stale = "
+                 f"last buy >{config.STALE_AFTER_DAYS}d ago (§5) · routine = buys in "
+                 f"≥{config.ROUTINE_MIN_DISTINCT_MONTHS} distinct months in the year "
+                 "before the window (§3) · all-noise-sized = every buy in the "
+                 "$3k–$15k 401(k)/ESPP band (§4)"),
     },
 )
 st.caption(f"{len(df)} cluster(s) · window {window_days}d · min buy ${min_value:,.0f} · "

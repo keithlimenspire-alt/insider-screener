@@ -145,7 +145,14 @@ def main() -> None:
         days = [date.fromisoformat(args.date)]
     else:
         today = date.today()
-        span = 7 if args.daily else args.days
+        if args.daily:
+            # Catch-up reaches back to the last finalized day, so an outage
+            # longer than a week heals itself instead of leaving silent holes.
+            last = conn.execute("SELECT MAX(day) FROM ingested_days").fetchone()[0]
+            gap = (today - date.fromisoformat(last)).days + 1 if last else 7
+            span = max(7, gap)
+        else:
+            span = args.days
         days = edgar.available_index_days(today - timedelta(days=span), today)
     log.info("ingesting %d day(s)", len(days))
     for d in days:

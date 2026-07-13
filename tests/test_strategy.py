@@ -74,6 +74,39 @@ def seed(conn):
     filing("D2", "400", "DDD", "2026-05-24")
     txn("D2", 0, "d4b", "P", "A", 20_000, 15.0, 40_000, director=1, tdate="2026-05-24")
 
+    # EEE: one economic trade split across TWO accessions (EDGAR owner cap),
+    # linked by the shared owner fundYe — must dedupe to one trade, one unit
+    filing("E1", "500", "EEE", "2026-07-07")
+    for owner in ("fundXe", "fundYe"):
+        txn("E1", 0, owner, "P", "A", 40_000, 10.0, 4_040_000, tenpct=1,
+            tdate="2026-07-07", n_owners=2)
+    filing("E2", "500", "EEE", "2026-07-07")
+    for owner in ("fundYe", "fundZe"):
+        txn("E2", 0, owner, "P", "A", 40_000, 10.0, 4_040_000, tenpct=1,
+            tdate="2026-07-07", n_owners=2)
+
+    # GGG: solo General Counsel buy (§4: high even solo)
+    filing("G1", "600", "GGG", "2026-07-08")
+    txn("G1", 0, "gc6", "P", "A", 8_000, 30.0, 20_000, officer=1,
+        title="General Counsel", tdate="2026-07-08")
+
+    # RRR: buys in 3 distinct months but all INSIDE the window -> not routine
+    filing("R1", "700", "RRR", "2026-05-20")
+    txn("R1", 0, "r7a", "P", "A", 15_000, 20.0, 30_000, director=1, tdate="2026-05-20")
+    filing("R2", "700", "RRR", "2026-06-20")
+    txn("R2", 0, "r7b", "P", "A", 15_000, 20.0, 30_000, director=1, tdate="2026-06-20")
+    filing("R3", "700", "RRR", "2026-07-01")
+    txn("R3", 0, "r7a", "P", "A", 15_000, 20.0, 45_000, director=1, tdate="2026-07-01")
+
+    # HHH: 3 distinct buy-months in the year BEFORE the window -> routine
+    for i, d in enumerate(("2026-01-10", "2026-02-10", "2026-03-10")):
+        filing(f"H{i}", "800", "HHH", d)
+        txn(f"H{i}", 0, "h8a", "P", "A", 1_000, 20.0, 10_000 + i, director=1, tdate=d)
+    filing("H3", "800", "HHH", "2026-07-02")
+    txn("H3", 0, "h8a", "P", "A", 15_000, 20.0, 40_000, director=1, tdate="2026-07-02")
+    filing("H4", "800", "HHH", "2026-07-02")
+    txn("H4", 0, "h8b", "P", "A", 15_000, 20.0, 40_000, director=1, tdate="2026-07-02")
+
     conn.commit()
 
 
@@ -104,10 +137,13 @@ def main():
     by_inc = {r.ticker: r for r in cl_inc.itertuples()}
     assert "BBB" in by_inc
 
-    # CCC: joint filing dedupes to one $500k trade + one $300k trade; the fund
-    # trade is >50% of $ and 10%-owners bought <2% of stake -> fund-noise flag
+    # CCC: 3 joint co-filers are ONE buying unit + 1 director = 2 units;
+    # money dedupes to one $500k trade + one $300k trade; the fund trade is
+    # >50% of $ and the 10%-owners bought <2% of stake -> fund-noise flag
     ccc = by["CCC"]
-    assert ccc.n_insiders == 4          # 3 joint entities + 1 director (Phase 1 semantics)
+    assert ccc.n_insiders == 2, "joint co-filers must collapse to one buying unit"
+    assert ccc.n_filers == 4
+    assert abs(ccc.role_score - 0.5) < 1e-9      # 10% unit 0.1 + Dir 0.4
     assert abs(ccc.total_value - 800_000) < 1e-6, ccc.total_value
     assert ccc.fund_noise
     assert "fund-noise" in ccc.flags
@@ -115,6 +151,30 @@ def main():
     # DDD: stale flag (50 days since last buy > 40)
     ddd = by["DDD"]
     assert ddd.stale and "stale" in ddd.flags
+
+    # EEE: one trade split across two accessions with an overlapping owner —
+    # one unit, ONE economic $400k trade, not two
+    cl1, _ = clusters.build_screen(conn, 60, 200_000, 1, as_of=AS_OF,
+                                   include_solo_gc=False)
+    eee = {r.ticker: r for r in cl1.itertuples()}["EEE"]
+    assert eee.n_insiders == 1 and eee.n_filers == 3
+    assert eee.n_buys == 1, "split joint trade must dedupe to one economic trade"
+    assert abs(eee.total_value - 400_000) < 1e-6, eee.total_value
+
+    # GGG: solo GC kept below the cluster minimum, flagged; dropped when off
+    ggg = by.get("GGG")
+    assert ggg is not None and "solo-GC" in ggg.flags
+    cl_nogc, _ = clusters.build_screen(conn, 60, 200_000, 2, as_of=AS_OF,
+                                       include_solo_gc=False)
+    assert "GGG" not in {r.ticker for r in cl_nogc.itertuples()}
+
+    # RRR: 3 buy-months inside the window -> NOT routine; HHH: 3 buy-months in
+    # the year before the window -> routine
+    rrr = by["RRR"]
+    assert not rrr.routine, "window's own buys must not self-flag routine"
+    hhh = by["HHH"]
+    assert hhh.routine and "routine" in hhh.flags
+    assert hhh.n_first_time == 1, "h8a bought before the window -> not first-time"
 
     # role weights
     assert clusters.role_weight("GC") == 1.0

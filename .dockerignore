@@ -1,0 +1,10 @@
+data/
+.venv/
+.git/
+.claude/
+.planning/
+__pycache__/
+*.pyc
+tests/
+scripts/
+*.md

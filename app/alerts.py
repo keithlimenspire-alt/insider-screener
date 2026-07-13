@@ -28,7 +28,8 @@ def check_alerts(conn: sqlite3.Connection,
     state = {r[0]: {"n_insiders": r[1], "total_value": r[2]}
              for r in conn.execute("SELECT ticker, n_insiders, total_value FROM alert_state")}
 
-    for row in cl.itertuples() if not cl.empty else []:
+    rows = list(cl.itertuples()) if not cl.empty else []
+    for row in rows:
         prev = state.get(row.ticker)
         kind = None
         if prev is None:
@@ -36,15 +37,21 @@ def check_alerts(conn: sqlite3.Connection,
         elif row.n_insiders > prev["n_insiders"]:
             kind = "expanded"
         if kind:
-            alert = {
+            fired.append({
                 "ts": now, "ticker": row.ticker, "kind": kind,
                 "n_insiders": int(row.n_insiders), "total_value": float(row.total_value),
                 "message": (f"{row.ticker} ({row.company}): {kind} cluster — "
                             f"{row.n_insiders} insiders, ${row.total_value:,.0f} total"
                             + (f" (was {prev['n_insiders']})" if prev else "")),
-            }
-            fired.append(alert)
-        with conn:
+            })
+
+    # State and alert log commit atomically — a crash can't record the state
+    # bump while swallowing the alert. Departed clusters are pruned so a
+    # re-formed cluster fires "new" again instead of hitting a stale
+    # high-water mark forever.
+    current = {row.ticker for row in rows}
+    with conn:
+        for row in rows:
             conn.execute(
                 """INSERT INTO alert_state (ticker, n_insiders, total_value, first_seen, last_seen)
                    VALUES (?, ?, ?, ?, ?)
@@ -53,13 +60,17 @@ def check_alerts(conn: sqlite3.Connection,
                        total_value = excluded.total_value,
                        last_seen = excluded.last_seen""",
                 (row.ticker, int(row.n_insiders), float(row.total_value), now, now))
-
-    if fired:
-        with conn:
+        stale = [t for t in state if t not in current]
+        if stale:
+            conn.executemany("DELETE FROM alert_state WHERE ticker = ?",
+                             [(t,) for t in stale])
+        if fired:
             conn.executemany(
                 """INSERT INTO alerts (ts, ticker, kind, n_insiders, total_value, message)
                    VALUES (:ts, :ticker, :kind, :n_insiders, :total_value, :message)""",
                 fired)
+
+    if fired:
         ALERTS_JSONL.parent.mkdir(parents=True, exist_ok=True)
         with ALERTS_JSONL.open("a", encoding="utf-8") as fh:
             for a in fired:
