@@ -70,3 +70,27 @@ BREADTH_WINDOW_DAYS = 20             # V2 §B: rolling window, unscheduled-buy s
 BREADTH_BULLISH_PCT = 33.0           # V2 §B: above ~1/3 buys = bullish
 BREADTH_VERY_BULLISH_PCT = 50.0      # V2 §B: historically very bullish
 BREADTH_NEUTRAL_FLOOR_PCT = 25.0     # below this the gauge reads weak
+
+# Tier scoring — composite cluster rank (S/A/B/C/D). Additive weights on the
+# positive signals (counts capped so one dimension can't dominate), penalties
+# for the §5 noise flags. Every number here is a backtest knob.
+TIER_WEIGHTS = {
+    "unit": 1.0,          # per independent buying unit
+    "role": 1.5,          # × role score (GC/CFO-heavy clusters rank up)
+    "conviction": 0.5,    # per ≥$80k buy
+    "notable": 0.75,      # per unit growing its stake ≥10%
+    "first_time": 0.5,    # per first-ever buyer
+    "regime_flip": 1.0,   # per seller-turned-buyer
+    "actionable": 1.0,    # timing gate passed (momentum, or value above 50d MA)
+}
+TIER_CAPS = {"unit": 5, "conviction": 5, "notable": 3, "first_time": 3,
+             "regime_flip": 2}
+TIER_PENALTIES = {
+    "fund_noise": 3.0,    # mostly 10%-owner rebalancing money
+    "routine": 2.0,       # insiders buy every month anyway
+    "stale": 1.5,         # no follow-through >40d
+    "all_noise_sized": 3.0,  # every buy in the 401(k)/ESPP band
+    "new_reporter": 0.5,  # history signals unreliable (FPI conversion)
+    "discounted": 2.0,    # majority of $ bought below market (a deal you can't get)
+}
+TIER_CUTOFFS = [("S", 10.0), ("A", 7.5), ("B", 5.0), ("C", 3.0)]  # below C → D

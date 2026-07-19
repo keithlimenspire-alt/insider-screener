@@ -24,6 +24,10 @@ WHERE t.transaction_code = 'P'          -- open-market purchase…
   AND t.is_derivative = 0               -- non-derivative table only (§9)
   AND t.transaction_date >= :cutoff
   AND t.transaction_date <= :as_of
+  -- Point-in-time honesty: a Form 4 is often filed 1-2 days after the trade;
+  -- only filings actually on file by :filed_by are visible (backtests pass
+  -- the evaluation date; live screens pass today, which excludes nothing).
+  AND f.filed_at <= :filed_by
   AND t.value IS NOT NULL AND t.value >= :min_value
   AND f.ticker IS NOT NULL AND f.ticker != ''
   -- Debt securities occasionally appear on Form 4 with principal amounts in
@@ -203,12 +207,17 @@ def _flag_inputs(conn: sqlite3.Connection, cutoff: date) -> dict:
 
 
 def load_qualifying_buys(conn: sqlite3.Connection, window_days: int,
-                         min_value: float, as_of: date | None = None) -> pd.DataFrame:
-    """Qualifying open-market buys in-window, with per-row judgement columns."""
+                         min_value: float, as_of: date | None = None,
+                         filed_by: date | None = None) -> pd.DataFrame:
+    """Qualifying open-market buys in-window, with per-row judgement columns.
+
+    `filed_by` caps which filings are visible (point-in-time backtests); it
+    defaults to today, which excludes nothing for a live screen."""
     as_of = as_of or date.today()
     cutoff = as_of - timedelta(days=window_days)
     df = pd.read_sql_query(QUALIFYING_BUYS_SQL, conn, params={
         "cutoff": cutoff.isoformat(), "as_of": as_of.isoformat(), "min_value": min_value,
+        "filed_by": (filed_by or date.today()).isoformat(),
     })
     if df.empty:
         return df
@@ -418,12 +427,14 @@ def compute_clusters(buys: pd.DataFrame, min_cluster: int,
 def build_screen(conn: sqlite3.Connection, window_days: int, min_value: float,
                  min_cluster: int, include_exercise_flagged: bool = False,
                  include_low_signal: bool = False, include_solo_gc: bool = True,
-                 as_of: date | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+                 as_of: date | None = None,
+                 filed_by: date | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Full screener pipeline: load → exclude exercise-flagged (§5) and
     low-signal (V2 §B: 10b5-1 / plan / offering) trades → cluster by buying
     unit. Returns (clusters, kept_buys)."""
     as_of = as_of or date.today()
-    buys = load_qualifying_buys(conn, window_days, min_value, as_of=as_of)
+    buys = load_qualifying_buys(conn, window_days, min_value, as_of=as_of,
+                                filed_by=filed_by)
     if buys.empty:
         return pd.DataFrame(), buys
 

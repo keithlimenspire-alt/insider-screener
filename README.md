@@ -36,6 +36,18 @@ documents distilled from paid courses — kept out of this public repo; the
   a port. Valuation-vs-own-5-year-range needs paid fundamentals data and is
   not implemented; use % below high + discount-to-entry as proxies.
 
+## Tier scoring + backtest
+
+Every cluster gets a composite **score** (buyers, roles, conviction sizes,
+stake increases, first-timers, regime flips, timing gate — minus the noise
+flags) mapped to **Tier S/A/B/C/D**. All weights live in `app/config.py`.
+
+`python backtest.py` walks the DB history Friday by Friday, **point-in-time**
+(only filings actually filed by each date are visible — `filed_by` — and the
+market context uses price history truncated to that date), scores every
+cluster, and measures forward returns vs SPY. Results land in
+`data/backtest_snapshots.csv` and `data/backtest_s_events.csv`.
+
 ## Setup
 
 ```powershell

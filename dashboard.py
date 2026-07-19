@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from app import (alerts, bootstrap, breadth, classify, clusters, config, db,
-                 edgar, ingest, prices)
+                 edgar, ingest, prices, scoring)
 
 st.set_page_config(page_title="Insider-Buying Screener", page_icon="📈", layout="wide")
 
@@ -310,19 +310,24 @@ if not df.empty:
         df.loc[new_rep, "routine"] = False
         df.loc[new_rep, "flags"] = (df.loc[new_rep, "flags"] + ", new-reporter"
                                     ).str.strip(", ")
+    df["new_reporter"] = new_rep
+    df = scoring.score_clusters(df)
 
 if df.empty:
     st.info("No clusters match the current filters. Widen the window, lower the "
             "minimum value or role score, or ingest more days of filings.")
     st.stop()
 
-cols = ["ticker", "company", "n_insiders", "n_filers", "n_buys", "total_value",
-        "largest_buy", "role_score", "max_trade_pct", "n_conviction", "n_notable",
-        "n_first_time", "days_since_first", "days_since_last", "roles", "flags"]
+cols = ["tier", "score", "ticker", "company", "n_insiders", "n_filers", "n_buys",
+        "total_value", "largest_buy", "role_score", "max_trade_pct", "n_conviction",
+        "n_notable", "n_first_time", "days_since_first", "days_since_last",
+        "roles", "flags"]
+if "tier" not in df.columns:      # scoring runs in the block above; guard anyway
+    df = scoring.score_clusters(df)
 if price_context:
-    cols[2:2] = ["trade_type", "actionable", "pct_below_high", "discount_to_entry_pct"]
+    cols[4:4] = ["trade_type", "actionable", "pct_below_high", "discount_to_entry_pct"]
 if cap_limit is not None:
-    cols.insert(2, "market_cap")
+    cols.insert(4, "market_cap")
 show = df[cols]
 
 event = st.dataframe(
@@ -332,6 +337,20 @@ event = st.dataframe(
     on_select="rerun",
     selection_mode="single-row",
     column_config={
+        "tier": st.column_config.TextColumn(
+            "Tier",
+            help="Overall grade S (exceptional) → D (noise). Adds up who is "
+                 "buying, how big and how unusual the buys are, and whether "
+                 "the timing test passes; subtracts the warning flags. Hover "
+                 "Score for the exact number behind it."),
+        "score": st.column_config.NumberColumn(
+            "Score", format="%.1f",
+            help="The composite number behind the tier. Positive points: "
+                 "each independent buyer, senior roles (GC/CFO), ≥$80k "
+                 "conviction buys, ≥10% stake increases, first-time buyers, "
+                 "sellers-turned-buyers, timing gate passed. Deductions: "
+                 "fund-noise, routine, stale, payroll-sized, below-market, "
+                 "and new-reporter flags."),
         "ticker": st.column_config.TextColumn("Ticker"),
         "company": st.column_config.TextColumn("Company", width="medium"),
         "market_cap": st.column_config.NumberColumn(
