@@ -182,11 +182,23 @@ def _flag_inputs(conn: sqlite3.Connection, cutoff: date) -> dict:
            WHERE t.transaction_code = 'P' AND t.acquired_disposed = 'A'
              AND t.is_derivative = 0 AND t.insider_cik IS NOT NULL
              AND t.transaction_date < ?""", cut)
+    # Internal-transfer tell: a same-day SALE by the same insider of the same
+    # issuer with identical share count and price means the "buy" just moved
+    # shares between the insider's own entities (e.g. holding-company
+    # reorganizations) — no new money at risk.
+    transfer_keys = {(r[0], r[1], r[2], round(r[3] or 0, 4), round(r[4] or 0, 4))
+                     for r in q(
+        """SELECT t.insider_cik, f.cik, t.transaction_date, t.shares, t.price_per_share
+           FROM transactions t JOIN filings f ON f.accession_no = t.accession_no
+           WHERE t.transaction_code = 'S' AND t.acquired_disposed = 'D'
+             AND t.is_derivative = 0 AND t.insider_cik IS NOT NULL
+             AND t.shares IS NOT NULL AND t.price_per_share IS NOT NULL""")}
     return {
         "warrant_accs": warrant_accs,
         "exercise_keys": exercise_keys,
         "regime_flip_keys": lookback_sellers - lookback_buyers,
         "prior_buyers": prior_buyers,
+        "transfer_keys": transfer_keys,
     }
 
 
@@ -207,6 +219,10 @@ def load_qualifying_buys(conn: sqlite3.Connection, window_days: int,
     df["exercise_flag"] = [int(k in flags["exercise_keys"]) for k in ins_day_iss]
     df["regime_flip"] = [int(k in flags["regime_flip_keys"]) for k in ins_iss]
     df["first_time"] = [int(k not in flags["prior_buyers"]) for k in ins_iss]
+    df["transfer_pair"] = [
+        int((c, i, d, round(s or 0, 4), round(p or 0, 4)) in flags["transfer_keys"])
+        for c, i, d, s, p in zip(df["insider_cik"], df["cik"], df["transaction_date"],
+                                 df["shares"], df["price_per_share"])]
     df["acquired_disposed"] = "A"  # column not selected; needed by _add_trade_pct
     df = _add_trade_pct(df)
     df["role"] = df.apply(short_role, axis=1)
@@ -251,7 +267,8 @@ def load_qualifying_buys(conn: sqlite3.Connection, window_days: int,
     df["offering"] = ((df["warrant_pair"] == 1)
                       | (same_price_units >= config.OFFERING_MIN_SAME_PRICE_UNITS)
                       | offering_fn)
-    df["low_signal"] = df["scheduled"] | df["plan_buy"] | df["offering"]
+    df["low_signal"] = (df["scheduled"] | df["plan_buy"] | df["offering"]
+                        | (df["transfer_pair"] == 1))
     # V2 §B: ~10% position increase is the "notable" line for an individual.
     df["notable"] = df["trade_pct"].notna() & (df["trade_pct"] >= config.NOTABLE_TRADE_PCT)
     return df
@@ -522,7 +539,7 @@ def insider_buy_history(conn: sqlite3.Connection, ticker: str) -> pd.DataFrame:
         SELECT t.insider_name, t.insider_cik, t.is_director, t.is_officer,
                t.officer_title, t.is_ten_percent_owner, t.transaction_date,
                t.shares, t.price_per_share, t.value, t.shares_owned_after,
-               f.filing_url, t.accession_no, t.txn_seq
+               t.security_title, f.filing_url, t.accession_no, t.txn_seq
         FROM transactions t JOIN filings f ON f.accession_no = t.accession_no
         WHERE f.ticker = :ticker AND t.transaction_code = 'P'
           AND t.acquired_disposed = 'A' AND t.is_derivative = 0

@@ -53,7 +53,7 @@ def seed(conn):
         title="Chief Executive Officer", tdate="2026-07-03")
     txn("B1", 1, "ceo2", "M", "A", 20_000, 10.0, 60_000, tdate="2026-07-03",
         officer=1, title="Chief Executive Officer")
-    txn("B1", 2, "ceo2", "S", "D", 20_000, 50.0, 40_000, tdate="2026-07-03",
+    txn("B1", 2, "ceo2", "S", "D", 15_000, 50.25, 45_000, tdate="2026-07-03",
         officer=1, title="Chief Executive Officer")
     # a clean director buy so BBB still exists as a 2-insider candidate pre-exclusion
     filing("B2", "200", "BBB", "2026-07-03")
@@ -134,6 +134,17 @@ def seed(conn):
         filing(f"K{i}", "1100", "KKK", "2026-07-07")
         txn(f"K{i}", 0, who, "P", "A", 25_000, 10.0, 25_000, director=1,
             tdate="2026-07-07")
+
+    # LLL: internal transfer — same-day buy AND sale of identical size/price
+    # (holding-company reorganization), plus a genuine buy by a second insider
+    filing("L1", "1200", "LLL", "2026-07-08")
+    txn("L1", 0, "l12a", "P", "A", 500_000, 8.63, 500_000, director=1,
+        tdate="2026-07-08")
+    txn("L1", 1, "l12a", "S", "D", 500_000, 8.63, 0, director=1,
+        tdate="2026-07-08")
+    filing("L2", "1200", "LLL", "2026-07-08")
+    txn("L2", 0, "l12b", "P", "A", 30_000, 8.70, 60_000, director=1,
+        tdate="2026-07-08")
 
     conn.commit()
 
@@ -220,6 +231,13 @@ def main():
                                      include_low_signal=True)
     by_ls = {r.ticker: r for r in cl_ls.itertuples()}
     assert "JJJ" in by_ls and "KKK" in by_ls
+
+    # LLL (V2): the same-day identical buy+sell is an internal transfer, not a
+    # buy — excluding it leaves one genuine unit -> no cluster at min 2
+    assert "LLL" not in by, "transfer-pair buy must not sustain the cluster"
+    lll_kept = kept[kept["ticker"] == "LLL"]
+    assert (lll_kept["insider_cik"] == "l12a").sum() == 0
+    assert "LLL" in by_ls, "transfer buy returns when low-signal included"
 
     # role weights
     assert clusters.role_weight("GC") == 1.0

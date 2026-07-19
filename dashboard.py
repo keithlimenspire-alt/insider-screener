@@ -151,9 +151,11 @@ include_lowsig = st.sidebar.checkbox(
     "Include low-signal buys", value=False,
     help="Show purchases that look automatic rather than deliberate: trades "
          "under pre-scheduled plans (SEC Rule 10b5-1), dividend-reinvestment / "
-         "401(k) / employee-stock-plan purchases, and shares bought in a "
-         "company offering or placement (where the price came from a deal, "
-         "not the open market). Hidden by default.")
+         "401(k) / employee-stock-plan purchases, shares bought in a company "
+         "offering or placement (where the price came from a deal, not the "
+         "open market), and internal transfers (a same-day sale of the exact "
+         "same size — shares moving between the insider's own entities, not "
+         "new money). Hidden by default.")
 solo_gc = st.sidebar.checkbox(
     "Include solo GC buys", value=True,
     help="A General Counsel — the company's top lawyer — buying stock is a "
@@ -371,8 +373,8 @@ event = st.dataframe(
                  "SOLD over the past year and have now switched to buying · "
                  "exercise×N = N buys hidden because the insider exercised "
                  "options and sold shares the same day (cashing out, not "
-                 "conviction) · lowsig×N = N buys hidden as automatic plan or "
-                 "offering purchases · below-mkt×N = N buys made ≥5% below the "
+                 "conviction) · lowsig×N = N buys hidden as automatic plan, "
+                 "offering, or internal-transfer purchases · below-mkt×N = N buys made ≥5% below the "
                  "market price that day (the insider got a deal you can't) · "
                  "fund-noise = most of the money is large funds adding tiny "
                  "amounts to existing stakes (routine rebalancing, not "
@@ -463,8 +465,8 @@ if pick:
                                              ascending=False).copy()
             st.dataframe(
                 detail[["transaction_date", "insider_name", "role", "shares",
-                        "price_per_share", "value", "shares_owned_after",
-                        "filing_url"]],
+                        "price_per_share", "value", "security_title",
+                        "shares_owned_after", "filing_url"]],
                 width="stretch",
                 hide_index=True,
                 column_config={
@@ -475,6 +477,13 @@ if pick:
                     "price_per_share": st.column_config.NumberColumn("Price",
                                                                      format="dollar"),
                     "value": st.column_config.NumberColumn("Value", format="dollar"),
+                    "security_title": st.column_config.TextColumn(
+                        "Security", width="medium",
+                        help="Which instrument was bought. Companies can have "
+                             "several traded securities at very different "
+                             "prices — e.g. common shares near $7 and "
+                             "preference shares near $20 — so compare prices "
+                             "only within the same security."),
                     "shares_owned_after": st.column_config.NumberColumn(
                         "Shares held after", format="localized",
                         help="The stake they reported holding right after this buy"),

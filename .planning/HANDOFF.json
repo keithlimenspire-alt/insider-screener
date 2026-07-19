@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "timestamp": "2026-07-19T10:22:39.357Z",
+  "timestamp": "2026-07-19T11:25:23.702Z",
   "source": "auto-postool",
   "partial": false,
   "phase": null,
@@ -23,8 +23,16 @@
     {
       "status": "M",
       "path": "app/clusters.py"
+    },
+    {
+      "status": "M",
+      "path": "dashboard.py"
+    },
+    {
+      "status": "M",
+      "path": "tests/test_strategy.py"
     }
   ],
   "next_action": null,
-  "context_notes": "Recent commits:\nc7b5a46 Rewrite all tooltips and captions in plain English\neee7ad0 Fix 21 confirmed V2 review findings\n7b1e08e V2 strategy upgrade (Insider-Buying-Strategy-20260719-V2): all tiers\n1003ba8 Add per-insider drill-down: Insiders summary tab + insider filter\nccf6567 Fix 24 confirmed Phase 2-4 review findings"
+  "context_notes": "Recent commits:\n26ee577 Thousand separators on all number columns\nc3d75a5 Add double-click launcher for the dashboard\nd8e4b46 Show individual buys on ticker click; fix row-click drill-down sync\nc7b5a46 Rewrite all tooltips and captions in plain English\neee7ad0 Fix 21 confirmed V2 review findings"
 }
