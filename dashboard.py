@@ -394,16 +394,25 @@ st.caption(f"{len(df)} cluster(s) · window {window_days}d · min buy ${min_valu
 
 selected_ticker = None
 if event.selection.rows:
-    selected_ticker = show.iloc[event.selection.rows[0]]["ticker"]
+    try:
+        selected_ticker = show.iloc[event.selection.rows[0]]["ticker"]
+    except IndexError:  # selection from a previous, larger render
+        selected_ticker = None
 
 # ---------------------------------------------------------------- drill-down
 
 st.divider()
 st.subheader("Ticker drill-down")
 all_tickers = df["ticker"].tolist()
-pick = st.selectbox("Ticker", all_tickers,
-                    index=all_tickers.index(selected_ticker) if selected_ticker else 0,
-                    help="Select a row above or pick a ticker here")
+# Row clicks must reliably drive the drill-down: write the clicked ticker into
+# the selectbox's session state (an `index=` default is ignored once the
+# widget has state, which made clicks appear to do nothing).
+if selected_ticker:
+    st.session_state["drill_ticker"] = selected_ticker
+if st.session_state.get("drill_ticker") not in all_tickers:
+    st.session_state["drill_ticker"] = all_tickers[0]
+pick = st.selectbox("Ticker", all_tickers, key="drill_ticker",
+                    help="Click a row above or pick a company here")
 
 if pick:
     tab_insiders, tab_txns, tab_chart, tab_record = st.tabs(
@@ -446,6 +455,36 @@ if pick:
                        "company (records collected since Jan 2026). Related "
                        "parties who file together — e.g. a fund and its "
                        "affiliates — appear as separate rows here.")
+
+        buys_detail = get_buy_history(pick)
+        if not buys_detail.empty:
+            st.subheader("Each open-market buy")
+            detail = buys_detail.sort_values("transaction_date",
+                                             ascending=False).copy()
+            st.dataframe(
+                detail[["transaction_date", "insider_name", "role", "shares",
+                        "price_per_share", "value", "shares_owned_after",
+                        "filing_url"]],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "transaction_date": st.column_config.TextColumn("Buy date"),
+                    "insider_name": st.column_config.TextColumn("Insider", width="medium"),
+                    "role": st.column_config.TextColumn("Role"),
+                    "shares": st.column_config.NumberColumn("Shares", format="%.0f"),
+                    "price_per_share": st.column_config.NumberColumn("Price",
+                                                                     format="$%.2f"),
+                    "value": st.column_config.NumberColumn("Value", format="$%.0f"),
+                    "shares_owned_after": st.column_config.NumberColumn(
+                        "Shares held after", format="%.0f",
+                        help="The stake they reported holding right after this buy"),
+                    "filing_url": st.column_config.LinkColumn("Filing",
+                                                              display_text="view"),
+                },
+            )
+            st.caption("One row per purchase (joint co-filed trades shown once). "
+                       "Sales, grants, and option activity are in the "
+                       "Transactions tab.")
 
     with tab_txns:
         txns = get_ticker_txns(pick)

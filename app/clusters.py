@@ -515,14 +515,20 @@ def insider_summary(conn: sqlite3.Connection, ticker: str) -> pd.DataFrame:
 
 
 def insider_buy_history(conn: sqlite3.Connection, ticker: str) -> pd.DataFrame:
-    """§3 track record input: every stored open-market buy of this ticker,
-    deduped to one row per economic trade (first listed owner)."""
+    """Every stored open-market buy of this ticker, one row per economic trade
+    (first listed owner), newest last. Powers the per-buy drill-down list,
+    the chart markers, and the track record."""
     df = pd.read_sql_query("""
-        SELECT t.insider_name, t.insider_cik, t.transaction_date, t.shares,
-               t.price_per_share, t.value, t.accession_no, t.txn_seq
+        SELECT t.insider_name, t.insider_cik, t.is_director, t.is_officer,
+               t.officer_title, t.is_ten_percent_owner, t.transaction_date,
+               t.shares, t.price_per_share, t.value, t.shares_owned_after,
+               f.filing_url, t.accession_no, t.txn_seq
         FROM transactions t JOIN filings f ON f.accession_no = t.accession_no
         WHERE f.ticker = :ticker AND t.transaction_code = 'P'
           AND t.acquired_disposed = 'A' AND t.is_derivative = 0
           AND t.price_per_share IS NOT NULL AND t.price_per_share > 0
         ORDER BY t.transaction_date""", conn, params={"ticker": ticker})
-    return df.drop_duplicates(subset=["accession_no", "txn_seq"])
+    df = df.drop_duplicates(subset=["accession_no", "txn_seq"])
+    if not df.empty:
+        df["role"] = df.apply(short_role, axis=1)
+    return df
