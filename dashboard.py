@@ -119,44 +119,59 @@ def get_recent_alerts() -> list:
 
 st.sidebar.title("Filters")
 window_days = st.sidebar.slider("Cluster window (days)", 7, 90, config.DEFAULT_WINDOW_DAYS,
-                                help="Rolling window over transaction dates (§2: 30–45d)")
+                                help="How far back to look for insider purchases. Buys "
+                                     "within this many days are grouped into one signal; "
+                                     "the strategy favors 30–45 days.")
 min_value = st.sidebar.number_input("Min single-buy value ($)", min_value=0,
                                     value=config.DEFAULT_MIN_BUY_VALUE, step=25_000,
-                                    help="§2: screen by dollar value, not shares")
+                                    help="Ignore purchases smaller than this dollar amount. "
+                                         "Dollar value matters more than share count — a "
+                                         "$500 buy of a cheap stock isn't a signal.")
 min_cluster = st.sidebar.slider("Min insiders in cluster", 1, 5, config.DEFAULT_MIN_CLUSTER_SIZE,
-                                help="§2–§3: ≥2 to screen, ≥3 ranks higher")
+                                help="Only show companies where at least this many different "
+                                     "insiders bought. Two or more buying together is the "
+                                     "core 'cluster' signal; three or more is stronger.")
 min_role_score = st.sidebar.slider("Min role score", 0.0, 3.0, 0.0, 0.1,
-                                   help="§4 weighted roles: GC 1.0 · CFO 0.9 · other "
-                                        "C-suite 0.8 · VP 0.7 · Dir 0.4 · CEO 0.3 · 10% 0.1. "
-                                        "Cluster score = sum over distinct insiders.")
+                                   help="Filter by WHO is buying. Each company's score adds "
+                                        "up its buyers' role weights: General Counsel 1.0 "
+                                        "(the top lawyer rarely buys carelessly), CFO 0.9, "
+                                        "other chief officers 0.8, VP 0.7, director 0.4, "
+                                        "CEO 0.3 (often performative), 10%-owner funds 0.1.")
 exclude_otc = st.sidebar.checkbox(
     "Exclude OTC", value=True,
-    help="Drops issuers SEC classifies as OTC (matched by CIK). Issuers absent "
-         "from SEC's exchange file are kept — absence is not proof of OTC.")
+    help="Hide companies whose shares trade only over-the-counter rather than "
+         "on a major exchange (NYSE, Nasdaq). Companies the SEC's exchange "
+         "list doesn't cover are kept — absence doesn't prove they're OTC.")
 include_exercise = st.sidebar.checkbox(
     "Include exercise-flagged buys", value=False,
-    help="§5 Starbucks trap: buys by insiders who filed an option exercise (M) "
-         "and a sale (S) at this issuer the same day are excluded by default.")
+    help="Some insiders 'buy' by exercising stock options and sell the shares "
+         "the same day — that's compensation being cashed out, not a vote of "
+         "confidence. Such buys are hidden by default; tick to show them.")
 include_lowsig = st.sidebar.checkbox(
     "Include low-signal buys", value=False,
-    help="V2 §B: 10b5-1 scheduled trades, DRIP/401(k)/ESPP plan purchases, and "
-         "offering/placement buys (warrant-paired or ≥3 buyers at one identical "
-         "round price) are excluded by default.")
+    help="Show purchases that look automatic rather than deliberate: trades "
+         "under pre-scheduled plans (SEC Rule 10b5-1), dividend-reinvestment / "
+         "401(k) / employee-stock-plan purchases, and shares bought in a "
+         "company offering or placement (where the price came from a deal, "
+         "not the open market). Hidden by default.")
 solo_gc = st.sidebar.checkbox(
     "Include solo GC buys", value=True,
-    help="§4: a General Counsel buying is a high signal even alone — kept on "
-         "screen (flagged solo-GC) even below the cluster minimum.")
+    help="A General Counsel — the company's top lawyer — buying stock is a "
+         "strong signal even with no other buyers alongside. This keeps solo "
+         "GC purchases on screen even below the cluster minimum.")
 
 st.sidebar.divider()
 st.sidebar.subheader("Market data (yfinance)")
 price_context = st.sidebar.checkbox(
     "Market context (type + entry gate)", value=True,
-    help="V2 §A/§B: classify each cluster value vs momentum, apply the 50-day "
-         "MA entry gate, and show % below high / discount to insider entry. "
-         "First fetch ~1s per ticker, then cached ~20h.")
+    help="Fetch price history for each screened stock (Yahoo Finance) to label "
+         "it value vs momentum, check how close it is to its highs, test the "
+         "50-day-average timing gate, and compare today's price with what the "
+         "insiders paid. First load ~1s per stock, then cached for the day.")
 cap_choice = st.sidebar.selectbox(
     "Market-cap cap", ["Any", "≤ $500M", "≤ $2B", "≤ $10B", "≤ $50B"],
-    help="Filters screened tickers by market cap (fetched per ticker, cached daily).")
+    help="Only show companies below this total market value. Fetched per stock "
+         "and cached daily; companies whose size can't be determined stay visible.")
 CAP_LIMITS = {"Any": None, "≤ $500M": 5e8, "≤ $2B": 2e9, "≤ $10B": 1e10, "≤ $50B": 5e10}
 
 stats = db_stats()
@@ -169,9 +184,10 @@ st.sidebar.caption(
 # ------------------------------------------------------------------ screener
 
 st.title("Insider-Buying Screener")
-st.caption("Open-market insider purchases (Form 4, code P/A, non-derivative) "
-           "clustered per ticker, with the §4–§5 judgement layer. "
-           "Screening tool only — no trade execution, no exit logic.")
+st.caption("Companies where insiders are buying their own stock with their own "
+           "money on the open market (from SEC Form 4 filings), grouped per "
+           "company and filtered for noise. A research tool only — it doesn't "
+           "trade, and it doesn't tell you when to sell.")
 
 # V2 §B market-wide breadth gauge: a top-down "should I be buying anything
 # right now" overlay computed from the full Form 4 firehose.
@@ -179,14 +195,22 @@ b = get_breadth()
 if b:
     c1, c2 = st.columns([1, 3])
     with c1:
-        st.metric(f"Unscheduled-buy share ({config.BREADTH_WINDOW_DAYS}d)",
-                  f"{b['buy_share']:.0f}%", b["label"], delta_color="off",
+        st.metric(f"Insiders buying vs selling ({config.BREADTH_WINDOW_DAYS}d)",
+                  f"{b['buy_share']:.0f}% buys", b["label"], delta_color="off",
                   delta_arrow="off",
-                  help="V2 §B: share of buys among unscheduled (non-10b5-1) "
-                       "insider trades, market-wide. Normally ~33%. Above "
-                       f"{config.BREADTH_BULLISH_PCT:.0f}% historically bullish; "
-                       f"above {config.BREADTH_VERY_BULLISH_PCT:.0f}% very bullish "
-                       "(COVID ~60%, 2022 bottom ~55%).")
+                  help="A market-wide mood gauge. Of all insider trades made by "
+                       "choice (ignoring sales and purchases that run on "
+                       "pre-set autopilot plans), this is the share that were "
+                       "BUYS over the last "
+                       f"{config.BREADTH_WINDOW_DAYS} trading days. In normal "
+                       "times only about a third are buys — insiders mostly "
+                       "sell. When the share rises above "
+                       f"{config.BREADTH_BULLISH_PCT:.0f}%, insiders as a group "
+                       "are unusually optimistic, which has historically been "
+                       "bullish for the whole market; above "
+                       f"{config.BREADTH_VERY_BULLISH_PCT:.0f}% strongly so — "
+                       "it hit ~60% at the 2020 COVID low and ~55% at the 2022 "
+                       "market bottom.")
     with c2:
         with st.expander(f"Breadth history (as of {b['as_of']})"):
             s = b["series"]
@@ -274,70 +298,92 @@ event = st.dataframe(
         "company": st.column_config.TextColumn("Company", width="medium"),
         "market_cap": st.column_config.NumberColumn(
             "Mkt cap", format="$%.0f",
-            help="From Yahoo Finance; clusters with unknown caps stay visible."),
+            help="Company size (total market value), from Yahoo Finance. "
+                 "Companies whose size couldn't be fetched stay visible."),
         "trade_type": st.column_config.TextColumn(
             "Type",
-            help="V2 §A: momentum = near multi-year highs (strength is the "
-                 "signal) · value = down from highs (discount + patience). "
-                 "Catalyst trades need event data and stay a manual call. "
-                 "Blank = no price history."),
+            help="What kind of bet this looks like. momentum = the stock is "
+                 "near its multi-year high and insiders are buying into "
+                 "strength · value = the stock is well below its highs and "
+                 "insiders are betting on a recovery. Blank = no price "
+                 "history available."),
         "actionable": st.column_config.CheckboxColumn(
             "Actionable",
-            help=f"V2 §B 50-day rule: value trades wait until price reclaims the "
-                 f"{config.MA_GATE_DAYS}-day MA (insiders are chronically early); "
-                 "momentum trades are actionable by definition. Judgement aid, "
-                 "not advice."),
+            help="Whether the timing test passes. Beaten-down (value) stocks "
+                 f"must first climb back above their {config.MA_GATE_DAYS}-day "
+                 "average price and hold it — insiders tend to buy too early, "
+                 "and waiting avoids catching a falling knife. Stocks near "
+                 "their highs pass automatically. A judgement aid, not advice."),
         "pct_below_high": st.column_config.NumberColumn(
             "% below high", format="%.1f%%",
-            help=f"§3: distance below the trailing {config.PRICE_HISTORY_YEARS}-year high"),
+            help="How far today's price is below the stock's highest close of "
+                 f"the past {config.PRICE_HISTORY_YEARS} years."),
         "discount_to_entry_pct": st.column_config.NumberColumn(
             "Disc. to entry", format="%.1f%%",
-            help="V2 §A value branch: how far the price sits below the cluster's "
-                 "volume-weighted insider entry (positive = you can buy cheaper "
-                 "than the insiders did)"),
+            help="Today's price compared with the average price the insiders "
+                 "paid. Positive = you can buy cheaper than they did; negative "
+                 "= the stock has already run above their entry."),
         "n_notable": st.column_config.NumberColumn(
             "# notable",
-            help=f"V2 §B: buying units that grew their stake ≥"
-                 f"{config.NOTABLE_TRADE_PCT:.0f}%"),
+            help="How many buyers increased their existing stake by at least "
+                 f"{config.NOTABLE_TRADE_PCT:.0f}% — a meaningful addition, "
+                 "not pocket change."),
         "n_insiders": st.column_config.NumberColumn(
             "# insiders",
-            help="Independent buying units: co-filers of one joint Form 4 (a fund "
-                 "family) count once. '# filers' shows the raw entity count."),
+            help="Number of independent buyers. Related parties who file one "
+                 "purchase together (e.g. a fund and its affiliates) count as "
+                 "ONE buyer, so a single decision can't look like a crowd."),
         "n_filers": st.column_config.NumberColumn(
-            "# filers", help="Raw distinct reporting-owner CIKs, joint co-filers included"),
+            "# filers",
+            help="Raw number of names on the filings, counting each "
+                 "affiliated co-filer separately."),
         "n_buys": st.column_config.NumberColumn("# buys"),
         "total_value": st.column_config.NumberColumn("Total $", format="$%.0f"),
         "largest_buy": st.column_config.NumberColumn("Largest buy", format="$%.0f"),
         "role_score": st.column_config.NumberColumn(
             "Role score", format="%.2f",
-            help="§4: sum of role weights over distinct insiders "
-                 "(GC 1.0 · CFO 0.9 · C-suite 0.8 · VP 0.7 · Dir 0.4 · CEO 0.3 · 10% 0.1)"),
+            help="Adds up WHO is buying, weighted by how meaningful each "
+                 "role's buying tends to be: General Counsel 1.0 · CFO 0.9 · "
+                 "other chief officers 0.8 · VP 0.7 · director 0.4 · CEO 0.3 · "
+                 "10%-owner funds 0.1. Higher = better-informed buyers."),
         "max_trade_pct": st.column_config.NumberColumn(
             "Max trade %", format="%.1f%%",
-            help="§3–§4: largest buy relative to that insider's prior holdings — "
-                 "the real conviction signal"),
+            help="The largest single purchase relative to what that buyer "
+                 "already owned. Someone growing their stake 50% is a far "
+                 "stronger signal than a fund adding 0.5%."),
         "n_conviction": st.column_config.NumberColumn(
-            "# conviction", help=f"§4: buys ≥ ${config.CONVICTION_MIN_VALUE:,}"),
+            "# conviction",
+            help=f"Purchases of ${config.CONVICTION_MIN_VALUE:,} or more — big "
+                 "enough to represent real personal conviction."),
         "n_first_time": st.column_config.NumberColumn(
-            "# first-time", help="§3: insiders whose first recorded buy of this "
-                                 "issuer falls in the window (grows more meaningful "
-                                 "as DB history accumulates)"),
+            "# first-time",
+            help="Buyers making their first recorded purchase of this "
+                 "company's stock. An insider who has never bought before "
+                 "suddenly buying is a tell. (Only as reliable as the filing "
+                 "history collected so far.)"),
         "days_since_first": st.column_config.NumberColumn("Days since 1st"),
         "days_since_last": st.column_config.NumberColumn("Days since last"),
         "roles": st.column_config.TextColumn("Roles", width="medium"),
         "flags": st.column_config.TextColumn(
             "Flags", width="medium",
-            help="solo-GC = General Counsel buying alone (§4 keeps it) · "
-                 "regime-flip×N = units that only sold last year, now buying (V2) · "
-                 "exercise×N = trades excluded for same-day M+S (§5) · "
-                 "lowsig×N = trades excluded as 10b5-1/plan/offering (V2) · "
-                 "below-mkt×N = buys ≥5% under that day's close (V2) · fund-noise = "
-                 ">50% of $ from 10%-owners buying <2% of their stake (§5) · stale = "
-                 f"last buy >{config.STALE_AFTER_DAYS}d ago (§5) · routine = buys in "
-                 f"≥{config.ROUTINE_MIN_DISTINCT_MONTHS} distinct months in the year "
-                 "before the window (§3) · new-reporter = first insider filing "
-                 "<12 months, history signals suppressed (V2) · all-noise-sized = "
-                 "every buy in the $3k–$15k 401(k)/ESPP band (§4)"),
+            help="Warning labels. solo-GC = the only buyer is the company's top "
+                 "lawyer (still notable) · regime-flip×N = N buyers who only "
+                 "SOLD over the past year and have now switched to buying · "
+                 "exercise×N = N buys hidden because the insider exercised "
+                 "options and sold shares the same day (cashing out, not "
+                 "conviction) · lowsig×N = N buys hidden as automatic plan or "
+                 "offering purchases · below-mkt×N = N buys made ≥5% below the "
+                 "market price that day (the insider got a deal you can't) · "
+                 "fund-noise = most of the money is large funds adding tiny "
+                 "amounts to existing stakes (routine rebalancing, not "
+                 "conviction) · stale = no new buys in over "
+                 f"{config.STALE_AFTER_DAYS} days · routine = this company's "
+                 "insiders buy almost every month, so another buy means "
+                 "little · new-reporter = the company only recently began "
+                 "insider filings (often a foreign company that changed "
+                 "reporting status), so history-based signals are unreliable · "
+                 "all-noise-sized = every buy is in the $3k–$15k range typical "
+                 "of automatic payroll plans"),
     },
 )
 st.caption(f"{len(df)} cluster(s) · window {window_days}d · min buy ${min_value:,.0f} · "
@@ -379,24 +425,27 @@ if pick:
                     "role": st.column_config.TextColumn("Role"),
                     "officer_title": st.column_config.TextColumn("Title", width="medium"),
                     "n_buys": st.column_config.NumberColumn(
-                        "# buys", help="Open-market purchases (code P)"),
+                        "# buys", help="Purchases made on the open market with "
+                                       "the insider's own money"),
                     "n_sells": st.column_config.NumberColumn(
-                        "# sells", help="Open-market sales (code S)"),
+                        "# sells", help="Sales made on the open market"),
                     "bought_value": st.column_config.NumberColumn("Bought $", format="$%.0f"),
                     "sold_value": st.column_config.NumberColumn("Sold $", format="$%.0f"),
                     "shares_owned": st.column_config.NumberColumn(
                         "Shares held", format="%.0f",
-                        help="Most recent shares-owned-after on file (direct + "
-                             "indirect as reported)"),
+                        help="The share count this insider most recently "
+                             "reported holding (owned directly and through "
+                             "trusts/entities, as filed)"),
                     "first_activity": st.column_config.TextColumn("First seen"),
                     "last_activity": st.column_config.TextColumn("Last activity"),
                     "filing_url": st.column_config.LinkColumn("Latest Form 4",
                                                               display_text="filing"),
                 },
             )
-            st.caption("Aggregated over every stored non-derivative transaction line "
-                       "for this issuer (history since 2026-01-15). Joint filings "
-                       "list each co-filing entity separately.")
+            st.caption("Totals cover every share transaction on file for this "
+                       "company (records collected since Jan 2026). Related "
+                       "parties who file together — e.g. a fund and its "
+                       "affiliates — appear as separate rows here.")
 
     with tab_txns:
         txns = get_ticker_txns(pick)
@@ -429,17 +478,21 @@ if pick:
                     "role": st.column_config.TextColumn("Role"),
                     "transaction_date": st.column_config.TextColumn("Date"),
                     "transaction_code": st.column_config.TextColumn("Code",
-                        help="P=open-market buy · S=sale · M=option exercise · A=grant · "
-                             "G=gift · F=tax withholding"),
+                        help="The SEC's transaction code: P = bought on the open "
+                             "market · S = sold on the open market · M = "
+                             "exercised stock options · A = received a company "
+                             "grant/award · G = gift · F = shares withheld to "
+                             "cover taxes"),
                     "acquired_disposed": st.column_config.TextColumn("A/D"),
                     "is_derivative": st.column_config.CheckboxColumn("Deriv?"),
                     "shares": st.column_config.NumberColumn("Shares", format="%.0f"),
                     "price_per_share": st.column_config.NumberColumn("Price", format="$%.2f"),
                     "value": st.column_config.NumberColumn("Value", format="$%.0f"),
                     "trade_pct": st.column_config.NumberColumn("Trade %", format="%.1f%%",
-                        help="Shares traded relative to holdings before the trade — "
-                             "the real conviction signal (§3–§4). Blank = new position "
-                             "or unknown prior holdings."),
+                        help="The size of this trade relative to what the "
+                             "insider already owned — growing a stake by 50% "
+                             "says far more than adding 1%. Blank = a brand-new "
+                             "position or unknown prior holdings."),
                     "shares_owned_after": st.column_config.NumberColumn("Shares after",
                                                                         format="%.0f"),
                     "security_title": st.column_config.TextColumn("Security"),
@@ -482,9 +535,9 @@ if pick:
             nh = get_near_high(pick)
             if nh:
                 last, pct_below = nh
-                st.caption(f"Last close ${last:,.2f} · {pct_below:.1f}% below the "
-                           f"trailing {config.PRICE_HISTORY_YEARS}-year high"
-                           + (" · **near-high** (§3)"
+                st.caption(f"Last close ${last:,.2f} · {pct_below:.1f}% below its "
+                           f"highest close of the past {config.PRICE_HISTORY_YEARS} years"
+                           + (" · **near its multi-year high**"
                               if pct_below <= config.NEAR_HIGH_MAX_PCT_BELOW else ""))
 
     with tab_record:
@@ -499,8 +552,9 @@ if pick:
             if last_close:
                 rec["pct_since_buy"] = (last_close - rec["price_per_share"]) \
                     / rec["price_per_share"] * 100.0
-                st.caption(f"Return measured against the last close (${last_close:,.2f}). "
-                           "Track record depth grows as DB history accumulates.")
+                st.caption(f"Price change measured against the latest close "
+                           f"(${last_close:,.2f}). The record deepens as more "
+                           "filing history is collected.")
             st.dataframe(
                 rec.sort_values("transaction_date", ascending=False),
                 width="stretch",
@@ -514,8 +568,8 @@ if pick:
                     "value": st.column_config.NumberColumn("Value", format="$%.0f"),
                     "pct_since_buy": st.column_config.NumberColumn(
                         "% since buy", format="%.1f%%",
-                        help="§3 insider track record: price change from that buy "
-                             "to the last close"),
+                        help="How the stock has moved since that purchase — the "
+                             "insider's track record on their past buys."),
                 },
             )
 
@@ -535,8 +589,9 @@ if pick:
         if not sells.empty:
             st.subheader("Sell-side record")
             if n_sched:
-                st.caption(f"{n_sched} scheduled (10b5-1) sell(s) excluded — "
-                           "plan sells say nothing about timing skill.")
+                st.caption(f"{n_sched} pre-scheduled sell(s) excluded — sales "
+                           "that run on autopilot plans (SEC Rule 10b5-1) say "
+                           "nothing about timing skill.")
             sv = sells[["insider_name", "role", "transaction_date", "shares",
                         "price_per_share", "value"]].copy()
             if last_close:
@@ -557,8 +612,9 @@ if pick:
                     "value": st.column_config.NumberColumn("Value", format="$%.0f"),
                     "pct_since_sell": st.column_config.NumberColumn(
                         "% since sell", format="%.1f%%",
-                        help="V2 §B: price move since the sell — negative means "
-                             "the stock fell afterwards (a well-timed sell; "
-                             "reward insiders whose sells precede drops)"),
+                        help="How the stock has moved since that sale. Negative "
+                             "= it fell after they sold, meaning the sale was "
+                             "well timed. Insiders whose sells precede drops "
+                             "deserve extra attention when they buy."),
                 },
             )
