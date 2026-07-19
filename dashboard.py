@@ -44,6 +44,15 @@ def get_buy_history(ticker: str) -> pd.DataFrame:
         conn.close()
 
 
+@st.cache_data(ttl=300)
+def get_insider_summary(ticker: str) -> pd.DataFrame:
+    conn = db.connect()
+    try:
+        return clusters.insider_summary(conn, ticker)
+    finally:
+        conn.close()
+
+
 @st.cache_data(ttl=3600)
 def get_cik_exchange_map() -> dict:
     try:
@@ -272,12 +281,56 @@ pick = st.selectbox("Ticker", all_tickers,
                     help="Select a row above or pick a ticker here")
 
 if pick:
-    tab_txns, tab_chart, tab_record = st.tabs(
-        ["Transactions", "Buys over price", "Insider track record"])
+    tab_insiders, tab_txns, tab_chart, tab_record = st.tabs(
+        ["Insiders", "Transactions", "Buys over price", "Insider track record"])
+
+    with tab_insiders:
+        summary = get_insider_summary(pick)
+        if summary.empty:
+            st.info("No stored non-derivative transactions for this ticker.")
+        else:
+            st.dataframe(
+                summary[["insider_name", "role", "officer_title", "n_buys", "n_sells",
+                         "bought_value", "sold_value", "shares_owned",
+                         "first_activity", "last_activity", "filing_url"]],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "insider_name": st.column_config.TextColumn("Insider", width="medium"),
+                    "role": st.column_config.TextColumn("Role"),
+                    "officer_title": st.column_config.TextColumn("Title", width="medium"),
+                    "n_buys": st.column_config.NumberColumn(
+                        "# buys", help="Open-market purchases (code P)"),
+                    "n_sells": st.column_config.NumberColumn(
+                        "# sells", help="Open-market sales (code S)"),
+                    "bought_value": st.column_config.NumberColumn("Bought $", format="$%.0f"),
+                    "sold_value": st.column_config.NumberColumn("Sold $", format="$%.0f"),
+                    "shares_owned": st.column_config.NumberColumn(
+                        "Shares held", format="%.0f",
+                        help="Most recent shares-owned-after on file (direct + "
+                             "indirect as reported)"),
+                    "first_activity": st.column_config.TextColumn("First seen"),
+                    "last_activity": st.column_config.TextColumn("Last activity"),
+                    "filing_url": st.column_config.LinkColumn("Latest Form 4",
+                                                              display_text="filing"),
+                },
+            )
+            st.caption("Aggregated over every stored non-derivative transaction line "
+                       "for this issuer (history since 2026-01-15). Joint filings "
+                       "list each co-filing entity separately.")
 
     with tab_txns:
         txns = get_ticker_txns(pick)
-        only_buys = st.toggle("Open-market buys only (code P)", value=False)
+        col_a, col_b = st.columns([2, 3])
+        with col_a:
+            only_buys = st.toggle("Open-market buys only (code P)", value=False)
+        with col_b:
+            insider_names = sorted(txns["insider_name"].dropna().unique().tolist())
+            who = st.selectbox("Insider", ["All insiders"] + insider_names,
+                               label_visibility="collapsed",
+                               help="Show one insider's transactions only")
+        if who != "All insiders":
+            txns = txns[txns["insider_name"] == who]
         if only_buys:
             txns = txns[(txns["transaction_code"] == "P") & (txns["acquired_disposed"] == "A")
                         & (txns["is_derivative"] == 0)]

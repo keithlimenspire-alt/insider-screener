@@ -354,6 +354,44 @@ def ticker_transactions(conn: sqlite3.Connection, ticker: str) -> pd.DataFrame:
     return _add_trade_pct(df)
 
 
+def insider_summary(conn: sqlite3.Connection, ticker: str) -> pd.DataFrame:
+    """Per-insider activity roll-up for one ticker (drill-down): who they are,
+    what they bought and sold on the open market, their current stake, and
+    when they last acted."""
+    df = ticker_transactions(conn, ticker)
+    if df.empty:
+        return df
+    nd = df[df["is_derivative"] == 0].copy()
+    if nd.empty:
+        return nd
+    # ticker_transactions is ordered newest-first, so first() per group is the
+    # most recent value.
+    nd["is_buy"] = (nd["transaction_code"] == "P") & (nd["acquired_disposed"] == "A")
+    nd["is_sell"] = (nd["transaction_code"] == "S") & (nd["acquired_disposed"] == "D")
+    nd["bought_value"] = nd["value"].where(nd["is_buy"])
+    nd["sold_value"] = nd["value"].where(nd["is_sell"])
+    grouped = nd.groupby("insider_name", dropna=False)
+    out = grouped.agg(
+        role=("role", "first"),
+        officer_title=("officer_title", "first"),
+        n_buys=("is_buy", "sum"),
+        n_sells=("is_sell", "sum"),
+        bought_value=("bought_value", "sum"),
+        sold_value=("sold_value", "sum"),
+        last_activity=("transaction_date", "max"),
+        first_activity=("transaction_date", "min"),
+        filing_url=("filing_url", "first"),
+    ).reset_index()
+    # Current stake: most recent non-null shares-owned-after per insider.
+    latest_stake = (nd.dropna(subset=["shares_owned_after"])
+                    .groupby("insider_name", dropna=False)["shares_owned_after"].first())
+    out["shares_owned"] = out["insider_name"].map(latest_stake)
+    out["n_buys"] = out["n_buys"].astype(int)
+    out["n_sells"] = out["n_sells"].astype(int)
+    return out.sort_values(["bought_value", "last_activity"],
+                           ascending=[False, False]).reset_index(drop=True)
+
+
 def insider_buy_history(conn: sqlite3.Connection, ticker: str) -> pd.DataFrame:
     """§3 track record input: every stored open-market buy of this ticker,
     deduped to one row per economic trade (first listed owner)."""
