@@ -1,0 +1,48 @@
+# Keeps the `data` release's database snapshot fresh: downloads the previous
+# snapshot, ingests the newest SEC Form 4 filings, and re-uploads it.
+# Runs after EDGAR posts the prior trading day's index (~22:05 US-Eastern).
+name: daily-data
+
+on:
+  schedule:
+    - cron: "30 3 * * 2-6"   # 03:30 UTC Tue–Sat = after Mon–Fri EDGAR postings
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests pandas
+
+      - name: Download current snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p data
+          if gh release download data --pattern insider.db.gz --dir data; then
+            gunzip -f data/insider.db.gz
+          else
+            echo "no existing snapshot — ingest will backfill 45 days"
+            python -m app.ingest --days 45
+          fi
+
+      - name: Catch-up ingest + alerts
+        run: python -m app.ingest --daily
+
+      - name: Upload refreshed snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gzip -6 -c data/insider.db > insider.db.gz
+          gh release create data --notes "rolling database snapshot" 2>/dev/null || true
+          gh release upload data insider.db.gz --clobber

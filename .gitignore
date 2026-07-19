@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+data/
+.streamlit/secrets.toml
+
+# personal strategy docs + local tooling state - never published
+Insider-Buying-*.md
+.planning/
+.claude/

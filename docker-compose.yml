@@ -1,0 +1,27 @@
+# Phase 4 always-on deployment (e.g. Docker on DigitalOcean).
+#   docker compose up -d
+# The dashboard serves on :8501; the ingest sidecar catches up once a day and
+# fires cluster alerts (data/alerts.jsonl). Both share ./data (SQLite in WAL
+# mode handles the single-writer/many-reader split).
+services:
+  dashboard:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  ingest:
+    build: .
+    # One-time 45-day backfill on first start (already-ingested days skip in
+    # seconds on restarts), then a daily catch-up + alerts loop.
+    command: >
+      sh -c "python -m app.ingest --days 45;
+             while true; do
+               python -m app.ingest --daily;
+               sleep 86400;
+             done"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
