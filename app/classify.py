@@ -51,7 +51,9 @@ def market_context_for(ticker: str, buys: pd.DataFrame,
     if hist is not None and not hist.empty:
         closes = hist["close"]
         last = float(closes.iloc[-1])
-        high = float(closes.max())
+        # The "multi-year high" stays a trailing ~3y window even when the
+        # underlying series is fetched deeper for backtest context.
+        high = float(closes.tail(config.TRAILING_HIGH_DAYS).max())
         out["last_close"] = last
         if high > 0:
             out["pct_below_high"] = (high - last) / high * 100.0

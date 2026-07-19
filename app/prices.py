@@ -24,15 +24,17 @@ def _yahoo_symbol(ticker: str) -> str:
     return ticker.upper().replace(".", "-")
 
 
-def _cache_path(ticker: str):
-    return config.PRICE_CACHE_DIR / f"{_SAFE.sub('_', ticker.upper())}.csv"
+def _cache_path(ticker: str, years: int):
+    # Depth-keyed: a cache fetched at 3y must not satisfy a 6y request, and a
+    # young listing's 6y file (short by nature) stays valid for 6y requests.
+    return config.PRICE_CACHE_DIR / f"{_SAFE.sub('_', ticker.upper())}_{years}y.csv"
 
 
 def get_history(ticker: str, years: int = config.PRICE_HISTORY_YEARS) -> pd.DataFrame | None:
     """Daily closes for the trailing `years` (split-adjusted, NOT dividend-
     adjusted — dividend adjustment deflates past prices and misstates the
     distance below the real high). Returns DataFrame(date, close) or None."""
-    path = _cache_path(ticker)
+    path = _cache_path(ticker, years)
     cached: pd.DataFrame | None = None
     if path.exists():
         try:
@@ -69,12 +71,14 @@ def get_history(ticker: str, years: int = config.PRICE_HISTORY_YEARS) -> pd.Data
 
 def near_high(ticker: str) -> tuple[float, float] | None:
     """(last_close, pct_below_trailing_high) for §3's near-multi-year-highs
-    signal, or None when no price history is available."""
+    signal, or None when no price history is available. The high is windowed
+    to the trailing ~3 years of trading days regardless of fetch depth."""
     df = get_history(ticker)
     if df is None or df.empty:
         return None
-    last = float(df["close"].iloc[-1])
-    high = float(df["close"].max())
+    closes = df["close"].tail(config.TRAILING_HIGH_DAYS)
+    last = float(closes.iloc[-1])
+    high = float(closes.max())
     if high <= 0:
         return None
     return last, (high - last) / high * 100.0

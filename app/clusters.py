@@ -134,69 +134,91 @@ def assign_buying_units(buys: pd.DataFrame) -> pd.Series:
 
 # --------------------------------------------------------------- load buys
 
-def _flag_inputs(conn: sqlite3.Connection, cutoff: date) -> dict:
+def _flag_inputs(conn: sqlite3.Connection, cutoff: date, buys: pd.DataFrame) -> dict:
     """Set-based inputs for the per-row judgement flags.
 
-    Computed as whole-table passes and merged in pandas rather than as
-    correlated EXISTS subqueries — with a few hundred thousand transaction
-    rows the correlated form degenerated into per-row scans of filings
-    (minutes instead of milliseconds), and set membership is planner-proof."""
+    Every query is bounded to the window's own insiders/accessions: with
+    multi-year history in the table (1.6M+ rows) the whole-table set builds
+    took ~100s per screen; per-insider IN-lists ride idx_txn_insider and
+    bring it back to ~1s."""
     regime_start = (cutoff - timedelta(days=config.REGIME_LOOKBACK_DAYS)).isoformat()
     cut = cutoff.isoformat()
-    q = conn.execute
+    insiders = sorted({c for c in buys["insider_cik"].dropna()})
+    accs = sorted(set(buys["accession_no"]))
+    filed_lo, filed_hi = buys["filed_at"].min(), buys["filed_at"].max()
+    txn_lo, txn_hi = buys["transaction_date"].min(), buys["transaction_date"].max()
+
+    def collect(sql_tpl: str, keys: list, params: tuple, shape) -> set:
+        out = set()
+        for i in range(0, len(keys), 500):
+            ch = keys[i:i + 500]
+            marks = ",".join("?" * len(ch))
+            for r in conn.execute(sql_tpl.format(marks=marks), (*params, *ch)):
+                out.add(shape(r))
+        return out
+
     # V2 §B offering tell: filings where warrants were PURCHASED alongside the
     # shares (a placement package). Code P only — warrant exercises (M/X) are
     # the exercise trap's business, not an offering tell.
-    warrant_accs = {r[0] for r in q(
+    warrant_accs = collect(
         """SELECT DISTINCT accession_no FROM transactions
-           WHERE is_derivative = 1 AND transaction_code = 'P'
-             AND acquired_disposed = 'A'
-             AND lower(coalesce(security_title, '')) LIKE '%warrant%'""")}
+           WHERE accession_no IN ({marks}) AND is_derivative = 1
+             AND transaction_code = 'P' AND acquired_disposed = 'A'
+             AND lower(coalesce(security_title, '')) LIKE '%warrant%'""",
+        accs, (), lambda r: r[0])
+
     # §5/§6 exercise trap: (insider, filed day, issuer) with an M and an S line.
     def _code_days(code: str) -> set:
-        return {(r[0], r[1], r[2]) for r in q(
+        return collect(
             """SELECT DISTINCT t.insider_cik, f.filed_at, f.cik
                FROM transactions t JOIN filings f ON f.accession_no = t.accession_no
-               WHERE t.transaction_code = ? AND t.insider_cik IS NOT NULL""", (code,))}
+               WHERE t.transaction_code = ? AND f.filed_at BETWEEN ? AND ?
+                 AND t.insider_cik IN ({marks})""",
+            insiders, (code, filed_lo, filed_hi), lambda r: (r[0], r[1], r[2]))
     exercise_keys = _code_days("M") & _code_days("S")
-    # V2 §B regime flip inputs + §3 first-time input: (insider, issuer) sets.
-    def _pairs(sql: str, *params) -> set:
-        return {(r[0], r[1]) for r in q(sql, params)}
-    # "A run of sells" (V2 §B): at least REGIME_MIN_SELLS distinct sale filings
-    # — one multi-line or co-filed sale must not masquerade as a run.
-    lookback_sellers = _pairs(
+
+    # V2 §B regime flip: "a run of sells" (≥REGIME_MIN_SELLS distinct sale
+    # filings) and no buy, in the lookback year before the window.
+    lookback_sellers = collect(
         f"""SELECT t.insider_cik, f.cik
            FROM transactions t JOIN filings f ON f.accession_no = t.accession_no
            WHERE t.transaction_code = 'S' AND t.acquired_disposed = 'D'
-             AND t.is_derivative = 0 AND t.insider_cik IS NOT NULL
-             AND t.transaction_date >= ? AND t.transaction_date < ?
+             AND t.is_derivative = 0 AND t.transaction_date >= ?
+             AND t.transaction_date < ? AND t.insider_cik IN ({{marks}})
            GROUP BY t.insider_cik, f.cik
            HAVING COUNT(DISTINCT t.accession_no) >= {int(config.REGIME_MIN_SELLS)}""",
-        regime_start, cut)
-    lookback_buyers = _pairs(
+        insiders, (regime_start, cut), lambda r: (r[0], r[1]))
+    lookback_buyers = collect(
         """SELECT DISTINCT t.insider_cik, f.cik
            FROM transactions t JOIN filings f ON f.accession_no = t.accession_no
            WHERE t.transaction_code = 'P' AND t.acquired_disposed = 'A'
-             AND t.is_derivative = 0 AND t.insider_cik IS NOT NULL
-             AND t.transaction_date >= ? AND t.transaction_date < ?""",
-        regime_start, cut)
-    prior_buyers = _pairs(
+             AND t.is_derivative = 0 AND t.transaction_date >= ?
+             AND t.transaction_date < ? AND t.insider_cik IN ({marks})""",
+        insiders, (regime_start, cut), lambda r: (r[0], r[1]))
+
+    # §3 first-time input: any open-market buy of the issuer before the window.
+    prior_buyers = collect(
         """SELECT DISTINCT t.insider_cik, f.cik
            FROM transactions t JOIN filings f ON f.accession_no = t.accession_no
            WHERE t.transaction_code = 'P' AND t.acquired_disposed = 'A'
-             AND t.is_derivative = 0 AND t.insider_cik IS NOT NULL
-             AND t.transaction_date < ?""", cut)
+             AND t.is_derivative = 0 AND t.transaction_date < ?
+             AND t.insider_cik IN ({marks})""",
+        insiders, (cut,), lambda r: (r[0], r[1]))
+
     # Internal-transfer tell: a same-day SALE by the same insider of the same
     # issuer with identical share count and price means the "buy" just moved
-    # shares between the insider's own entities (e.g. holding-company
-    # reorganizations) — no new money at risk.
-    transfer_keys = {(r[0], r[1], r[2], round(r[3] or 0, 4), round(r[4] or 0, 4))
-                     for r in q(
+    # shares between the insider's own entities — no new money at risk.
+    transfer_keys = collect(
         """SELECT t.insider_cik, f.cik, t.transaction_date, t.shares, t.price_per_share
            FROM transactions t JOIN filings f ON f.accession_no = t.accession_no
            WHERE t.transaction_code = 'S' AND t.acquired_disposed = 'D'
-             AND t.is_derivative = 0 AND t.insider_cik IS NOT NULL
-             AND t.shares IS NOT NULL AND t.price_per_share IS NOT NULL""")}
+             AND t.is_derivative = 0 AND t.shares IS NOT NULL
+             AND t.price_per_share IS NOT NULL
+             AND t.transaction_date BETWEEN ? AND ?
+             AND t.insider_cik IN ({marks})""",
+        insiders, (txn_lo, txn_hi),
+        lambda r: (r[0], r[1], r[2], round(r[3] or 0, 4), round(r[4] or 0, 4)))
+
     return {
         "warrant_accs": warrant_accs,
         "exercise_keys": exercise_keys,
@@ -221,7 +243,7 @@ def load_qualifying_buys(conn: sqlite3.Connection, window_days: int,
     })
     if df.empty:
         return df
-    flags = _flag_inputs(conn, cutoff)
+    flags = _flag_inputs(conn, cutoff, df)
     ins_day_iss = list(zip(df["insider_cik"], df["filed_at"], df["cik"]))
     ins_iss = list(zip(df["insider_cik"], df["cik"]))
     df["warrant_pair"] = df["accession_no"].isin(flags["warrant_accs"]).astype(int)

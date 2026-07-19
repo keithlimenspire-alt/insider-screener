@@ -25,10 +25,14 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 
 from app import classify, clusters, db, prices, scoring  # noqa: E402
 
-WALK_START = date(2026, 2, 27)   # ~6 weeks of DB history before the first eval
+WALK_START = date(2026, 2, 27)   # defaults; override:  python backtest.py 2023-07-07 2026-07-10
 WALK_END = date(2026, 7, 10)
 HORIZONS = (5, 10, 21, 63)       # trading days
 BENCH = "SPY"
+
+if len(sys.argv) >= 3:
+    WALK_START = date.fromisoformat(sys.argv[1])
+    WALK_END = date.fromisoformat(sys.argv[2])
 
 
 def fridays(start: date, end: date) -> list[date]:

@@ -49,7 +49,10 @@ STALE_AFTER_DAYS = 40                # §5: no follow-through for >5–6 weeks
 NEAR_HIGH_MAX_PCT_BELOW = 15.0       # §3: within 5–15% of multi-year high
 ROUTINE_MIN_DISTINCT_MONTHS = 3      # §3: buys recurring ~monthly = routine
 ROUTINE_LOOKBACK_DAYS = 365          # …counted in the year BEFORE the window
-PRICE_HISTORY_YEARS = 3              # trailing window for the multi-year high
+PRICE_HISTORY_YEARS = 6              # fetch depth (multi-year backtests need
+                                     # context years before the eval date)
+TRAILING_HIGH_DAYS = 756             # "multi-year high" = trailing ~3y of
+                                     # TRADING days, windowed within the series
 PRICE_CACHE_DIR = CACHE_DIR / "prices"
 PRICE_CACHE_TTL_HOURS = 20.0
 
