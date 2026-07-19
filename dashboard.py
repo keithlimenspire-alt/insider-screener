@@ -297,7 +297,7 @@ event = st.dataframe(
         "ticker": st.column_config.TextColumn("Ticker"),
         "company": st.column_config.TextColumn("Company", width="medium"),
         "market_cap": st.column_config.NumberColumn(
-            "Mkt cap", format="$%.0f",
+            "Mkt cap", format="compact",
             help="Company size (total market value), from Yahoo Finance. "
                  "Companies whose size couldn't be fetched stay visible."),
         "trade_type": st.column_config.TextColumn(
@@ -338,8 +338,8 @@ event = st.dataframe(
             help="Raw number of names on the filings, counting each "
                  "affiliated co-filer separately."),
         "n_buys": st.column_config.NumberColumn("# buys"),
-        "total_value": st.column_config.NumberColumn("Total $", format="$%.0f"),
-        "largest_buy": st.column_config.NumberColumn("Largest buy", format="$%.0f"),
+        "total_value": st.column_config.NumberColumn("Total $", format="dollar"),
+        "largest_buy": st.column_config.NumberColumn("Largest buy", format="dollar"),
         "role_score": st.column_config.NumberColumn(
             "Role score", format="%.2f",
             help="Adds up WHO is buying, weighted by how meaningful each "
@@ -438,10 +438,10 @@ if pick:
                                        "the insider's own money"),
                     "n_sells": st.column_config.NumberColumn(
                         "# sells", help="Sales made on the open market"),
-                    "bought_value": st.column_config.NumberColumn("Bought $", format="$%.0f"),
-                    "sold_value": st.column_config.NumberColumn("Sold $", format="$%.0f"),
+                    "bought_value": st.column_config.NumberColumn("Bought $", format="dollar"),
+                    "sold_value": st.column_config.NumberColumn("Sold $", format="dollar"),
                     "shares_owned": st.column_config.NumberColumn(
-                        "Shares held", format="%.0f",
+                        "Shares held", format="localized",
                         help="The share count this insider most recently "
                              "reported holding (owned directly and through "
                              "trusts/entities, as filed)"),
@@ -471,12 +471,12 @@ if pick:
                     "transaction_date": st.column_config.TextColumn("Buy date"),
                     "insider_name": st.column_config.TextColumn("Insider", width="medium"),
                     "role": st.column_config.TextColumn("Role"),
-                    "shares": st.column_config.NumberColumn("Shares", format="%.0f"),
+                    "shares": st.column_config.NumberColumn("Shares", format="localized"),
                     "price_per_share": st.column_config.NumberColumn("Price",
-                                                                     format="$%.2f"),
-                    "value": st.column_config.NumberColumn("Value", format="$%.0f"),
+                                                                     format="dollar"),
+                    "value": st.column_config.NumberColumn("Value", format="dollar"),
                     "shares_owned_after": st.column_config.NumberColumn(
-                        "Shares held after", format="%.0f",
+                        "Shares held after", format="localized",
                         help="The stake they reported holding right after this buy"),
                     "filing_url": st.column_config.LinkColumn("Filing",
                                                               display_text="view"),
@@ -524,16 +524,16 @@ if pick:
                              "cover taxes"),
                     "acquired_disposed": st.column_config.TextColumn("A/D"),
                     "is_derivative": st.column_config.CheckboxColumn("Deriv?"),
-                    "shares": st.column_config.NumberColumn("Shares", format="%.0f"),
-                    "price_per_share": st.column_config.NumberColumn("Price", format="$%.2f"),
-                    "value": st.column_config.NumberColumn("Value", format="$%.0f"),
+                    "shares": st.column_config.NumberColumn("Shares", format="localized"),
+                    "price_per_share": st.column_config.NumberColumn("Price", format="dollar"),
+                    "value": st.column_config.NumberColumn("Value", format="dollar"),
                     "trade_pct": st.column_config.NumberColumn("Trade %", format="%.1f%%",
                         help="The size of this trade relative to what the "
                              "insider already owned — growing a stake by 50% "
                              "says far more than adding 1%. Blank = a brand-new "
                              "position or unknown prior holdings."),
                     "shares_owned_after": st.column_config.NumberColumn("Shares after",
-                                                                        format="%.0f"),
+                                                                        format="localized"),
                     "security_title": st.column_config.TextColumn("Security"),
                     "filing_url": st.column_config.LinkColumn("Form 4", display_text="filing"),
                 },
@@ -601,10 +601,10 @@ if pick:
                 column_config={
                     "insider_name": st.column_config.TextColumn("Insider", width="medium"),
                     "transaction_date": st.column_config.TextColumn("Buy date"),
-                    "shares": st.column_config.NumberColumn("Shares", format="%.0f"),
+                    "shares": st.column_config.NumberColumn("Shares", format="localized"),
                     "price_per_share": st.column_config.NumberColumn("Buy price",
-                                                                     format="$%.2f"),
-                    "value": st.column_config.NumberColumn("Value", format="$%.0f"),
+                                                                     format="dollar"),
+                    "value": st.column_config.NumberColumn("Value", format="dollar"),
                     "pct_since_buy": st.column_config.NumberColumn(
                         "% since buy", format="%.1f%%",
                         help="How the stock has moved since that purchase — the "
@@ -645,10 +645,10 @@ if pick:
                     "insider_name": st.column_config.TextColumn("Insider", width="medium"),
                     "role": st.column_config.TextColumn("Role"),
                     "transaction_date": st.column_config.TextColumn("Sell date"),
-                    "shares": st.column_config.NumberColumn("Shares", format="%.0f"),
+                    "shares": st.column_config.NumberColumn("Shares", format="localized"),
                     "price_per_share": st.column_config.NumberColumn("Sell price",
-                                                                     format="$%.2f"),
-                    "value": st.column_config.NumberColumn("Value", format="$%.0f"),
+                                                                     format="dollar"),
+                    "value": st.column_config.NumberColumn("Value", format="dollar"),
                     "pct_since_sell": st.column_config.NumberColumn(
                         "% since sell", format="%.1f%%",
                         help="How the stock has moved since that sale. Negative "
