@@ -181,6 +181,7 @@ if b:
     with c1:
         st.metric(f"Unscheduled-buy share ({config.BREADTH_WINDOW_DAYS}d)",
                   f"{b['buy_share']:.0f}%", b["label"], delta_color="off",
+                  delta_arrow="off",
                   help="V2 §B: share of buys among unscheduled (non-10b5-1) "
                        "insider trades, market-wide. Normally ~33%. Above "
                        f"{config.BREADTH_BULLISH_PCT:.0f}% historically bullish; "
@@ -235,8 +236,10 @@ if not df.empty and price_context:
         progress=lambda frac, t: prog.progress(frac, text=f"Market context: {t}"))
     prog.empty()
 
-    # V2 §B FPI/new-reporter: first insider filing < 12 months → history-based
-    # signals (first-time, routine) are artifacts of the reporting change.
+# V2 §B FPI/new-reporter (Tier 1 — independent of the market-context toggle):
+# first insider filing < 12 months → history-based signals (first-time,
+# routine) are artifacts of the reporting change, not conviction floods.
+if not df.empty:
     cutoff_new = (date.today() - timedelta(days=config.NEW_REPORTER_MONTHS * 30)).isoformat()
     first_dates = {c: get_first_insider_filing(str(c)) for c in df["cik"].unique()}
     new_rep = df["cik"].map(lambda c: (first_dates.get(c) or "") > cutoff_new)
@@ -340,7 +343,8 @@ event = st.dataframe(
 st.caption(f"{len(df)} cluster(s) · window {window_days}d · min buy ${min_value:,.0f} · "
            f"min {min_cluster} insider(s)"
            + (f" · role score ≥ {min_role_score}" if min_role_score > 0 else "")
-           + (" · exercise-flagged included" if include_exercise else ""))
+           + (" · exercise-flagged included" if include_exercise else "")
+           + (" · low-signal included" if include_lowsig else ""))
 
 selected_ticker = None
 if event.selection.rows:
@@ -522,9 +526,17 @@ if pick:
                       & (sells["is_derivative"] == 0)
                       & sells["price_per_share"].notna()
                       & (sells["price_per_share"] > 0)]
-        sells = sells.drop_duplicates(subset=["accession_no", "txn_seq"])
+        sells = sells.drop_duplicates(subset=["accession_no", "txn_seq"]).copy()
+        # 10b5-1 plan sells carry no timing signal — keep the record honest.
+        scheduled = clusters.is_scheduled(sells) if not sells.empty else pd.Series(dtype=bool)
+        n_sched = int(scheduled.sum()) if not sells.empty else 0
+        if not sells.empty:
+            sells = sells[~scheduled]
         if not sells.empty:
             st.subheader("Sell-side record")
+            if n_sched:
+                st.caption(f"{n_sched} scheduled (10b5-1) sell(s) excluded — "
+                           "plan sells say nothing about timing skill.")
             sv = sells[["insider_name", "role", "transaction_date", "shares",
                         "price_per_share", "value"]].copy()
             if last_close:

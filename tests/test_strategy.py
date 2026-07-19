@@ -108,10 +108,14 @@ def seed(conn):
     filing("H4", "800", "HHH", "2026-07-02")
     txn("H4", 0, "h8b", "P", "A", 15_000, 20.0, 40_000, director=1, tdate="2026-07-02")
 
-    # III (V2): regime flip — i9a only SOLD in the lookback year, now buys
+    # III (V2): regime flip — i9a ran a streak of SELLS in the lookback year
+    # (two distinct sale filings = a "run"), now buys
     filing("I0", "900", "III", "2026-02-15")
     txn("I0", 0, "i9a", "S", "D", 5_000, 22.0, 95_000, officer=1,
         title="Chief Operating Officer", tdate="2026-02-15")
+    filing("I0b", "900", "III", "2026-03-20")
+    txn("I0b", 0, "i9a", "S", "D", 4_000, 23.0, 91_000, officer=1,
+        title="Chief Operating Officer", tdate="2026-03-20")
     filing("I1", "900", "III", "2026-07-03")
     txn("I1", 0, "i9a", "P", "A", 12_000, 21.0, 107_000, officer=1,
         title="Chief Operating Officer", tdate="2026-07-03")

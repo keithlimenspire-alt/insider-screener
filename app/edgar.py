@@ -191,8 +191,11 @@ def first_insider_filing_date(cik: str, max_age_days: float = 7.0,
             cj = _cached_json(sub_dir / chunk["name"],
                               f"https://data.sec.gov/submissions/{chunk['name']}",
                               max_age_days * 4)
-            if not cj:
-                continue
+            if cj is None:
+                # Unreachable archive → the true earliest date is unknown.
+                # Fail safe (None = not flagged new) rather than falsely
+                # reporting a long-history filer as a fresh reporter.
+                return None
             found = min((d for f, d in zip(cj["form"], cj["filingDate"])
                          if f in _OWNERSHIP_FORMS), default=None)
             if found:

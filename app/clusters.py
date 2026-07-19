@@ -140,10 +140,13 @@ def _flag_inputs(conn: sqlite3.Connection, cutoff: date) -> dict:
     regime_start = (cutoff - timedelta(days=config.REGIME_LOOKBACK_DAYS)).isoformat()
     cut = cutoff.isoformat()
     q = conn.execute
-    # V2 §B offering tell: filings whose derivative table carries warrants.
+    # V2 §B offering tell: filings where warrants were PURCHASED alongside the
+    # shares (a placement package). Code P only — warrant exercises (M/X) are
+    # the exercise trap's business, not an offering tell.
     warrant_accs = {r[0] for r in q(
         """SELECT DISTINCT accession_no FROM transactions
-           WHERE is_derivative = 1
+           WHERE is_derivative = 1 AND transaction_code = 'P'
+             AND acquired_disposed = 'A'
              AND lower(coalesce(security_title, '')) LIKE '%warrant%'""")}
     # §5/§6 exercise trap: (insider, filed day, issuer) with an M and an S line.
     def _code_days(code: str) -> set:
@@ -155,12 +158,16 @@ def _flag_inputs(conn: sqlite3.Connection, cutoff: date) -> dict:
     # V2 §B regime flip inputs + §3 first-time input: (insider, issuer) sets.
     def _pairs(sql: str, *params) -> set:
         return {(r[0], r[1]) for r in q(sql, params)}
+    # "A run of sells" (V2 §B): at least REGIME_MIN_SELLS distinct sale filings
+    # — one multi-line or co-filed sale must not masquerade as a run.
     lookback_sellers = _pairs(
-        """SELECT DISTINCT t.insider_cik, f.cik
+        f"""SELECT t.insider_cik, f.cik
            FROM transactions t JOIN filings f ON f.accession_no = t.accession_no
            WHERE t.transaction_code = 'S' AND t.acquired_disposed = 'D'
              AND t.is_derivative = 0 AND t.insider_cik IS NOT NULL
-             AND t.transaction_date >= ? AND t.transaction_date < ?""",
+             AND t.transaction_date >= ? AND t.transaction_date < ?
+           GROUP BY t.insider_cik, f.cik
+           HAVING COUNT(DISTINCT t.accession_no) >= {int(config.REGIME_MIN_SELLS)}""",
         regime_start, cut)
     lookback_buyers = _pairs(
         """SELECT DISTINCT t.insider_cik, f.cik
@@ -212,28 +219,38 @@ def load_qualifying_buys(conn: sqlite3.Connection, window_days: int,
     # §5 fund noise: 10%-owner buying a tiny fraction of an existing stake, OR
     # with inconsistent/unknown holdings reporting ("de-weight, don't
     # auto-trust"). A genuine new position (prior == 0) is not noise.
-    # V2 carve-out: applies ONLY to 10%-owners/institutions, never individuals.
+    # V2 carve-out: institutions only — a founder-CEO whose stake crossed 10%
+    # (the spec's Hannigan example) is a person, not a fund; the officer bit
+    # identifies them. Directors are NOT exempt: deputized fund entities
+    # routinely file with is_director=1.
     tiny = df["trade_pct"].notna() & (df["trade_pct"] < config.FUND_NOISE_MAX_TRADE_PCT)
     inconsistent = df["prior_shares"].isna() | (df["prior_shares"] < 0)
-    df["fund_noise"] = (df["is_ten_percent_owner"] == 1) & (tiny | inconsistent)
+    df["fund_noise"] = ((df["is_ten_percent_owner"] == 1)
+                        & (df["is_officer"] != 1) & (tiny | inconsistent))
     df["unit"] = assign_buying_units(df)
 
     # ---- V2 §B low-signal exclusions (nuke before scoring) ----
     fn = df["footnotes"].map(lambda s: s.lower() if isinstance(s, str) else "")
     # Scheduled trades: the 10b5-1 checkbox or a plan footnote.
-    df["scheduled"] = (df["aff_10b5_one"] == 1) | fn.str.contains("10b5-1", regex=False)
+    df["scheduled"] = is_scheduled(df)
     # Plan purchases: DRIP / 401(k) / ESPP mechanics, not conviction buys.
     df["plan_buy"] = (fn.str.contains("dividend reinvest", regex=False)
+                      | fn.str.contains("distribution reinvest", regex=False)
                       | fn.str.contains("401(k)", regex=False)
                       | fn.str.contains("employee stock purchase", regex=False)
                       | fn.str.contains("espp", regex=False))
-    # Offerings/placements: warrant-paired shares, or multiple independent
-    # buying units at one identical round-dollar price.
+    # Offerings/placements — three independent tells per V2 §B: warrant-paired
+    # shares, multiple independent buying units at one identical price, or a
+    # footnote that says so outright.
     same_price_units = df.groupby(
         ["ticker", "transaction_date", "price_per_share"])["unit"].transform("nunique")
-    round_price = df["price_per_share"].notna() & (df["price_per_share"] % 1 == 0)
-    df["offering"] = (df["warrant_pair"] == 1) | (
-        (same_price_units >= config.OFFERING_MIN_SAME_PRICE_UNITS) & round_price)
+    offering_fn = (fn.str.contains("public offering", regex=False)
+                   | fn.str.contains("underwrit", regex=False)
+                   | fn.str.contains("private placement", regex=False)
+                   | fn.str.contains("directed share", regex=False))
+    df["offering"] = ((df["warrant_pair"] == 1)
+                      | (same_price_units >= config.OFFERING_MIN_SAME_PRICE_UNITS)
+                      | offering_fn)
     df["low_signal"] = df["scheduled"] | df["plan_buy"] | df["offering"]
     # V2 §B: ~10% position increase is the "notable" line for an individual.
     df["notable"] = df["trade_pct"].notna() & (df["trade_pct"] >= config.NOTABLE_TRADE_PCT)
@@ -412,7 +429,11 @@ def build_screen(conn: sqlite3.Connection, window_days: int, min_value: float,
         excluded_counts = _trade_counts(buys[exercise_trade])
     if not include_low_signal:
         drop |= lowsig_trade
-        lowsig_counts = _trade_counts(buys[lowsig_trade & ~exercise_trade])
+        # Attribute both-flagged trades to the exercise count only when the
+        # exercise exclusion is active — otherwise they'd vanish from both.
+        lowsig_mask = (lowsig_trade if include_exercise_flagged
+                       else lowsig_trade & ~exercise_trade)
+        lowsig_counts = _trade_counts(buys[lowsig_mask])
     kept = buys[~drop]
 
     cutoff = as_of - timedelta(days=window_days)
@@ -431,12 +452,19 @@ SELECT t.insider_name, t.insider_cik, t.is_director, t.is_officer, t.officer_tit
        t.is_ten_percent_owner, t.transaction_date, t.transaction_code,
        t.acquired_disposed, t.is_derivative, t.shares, t.price_per_share, t.value,
        t.shares_owned_after, t.direct_indirect, t.security_title,
+       t.footnotes, f.aff_10b5_one,
        f.filed_at, f.filing_url, t.accession_no, t.txn_seq
 FROM transactions t
 JOIN filings f ON f.accession_no = t.accession_no
 WHERE f.ticker = :ticker
 ORDER BY t.transaction_date DESC, t.accession_no, t.txn_seq
 """
+
+
+def is_scheduled(df: pd.DataFrame) -> pd.Series:
+    """Shared 10b5-1 predicate: filing checkbox or plan footnote."""
+    fn = df["footnotes"].map(lambda s: s.lower() if isinstance(s, str) else "")
+    return (df["aff_10b5_one"] == 1) | fn.str.contains("10b5-1", regex=False)
 
 
 def ticker_transactions(conn: sqlite3.Connection, ticker: str) -> pd.DataFrame:

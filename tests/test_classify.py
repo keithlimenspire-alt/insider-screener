@@ -18,10 +18,12 @@ def hist(closes):
     return pd.DataFrame({"date": dates, "close": closes})
 
 
-def buys_frame(rows):
-    return pd.DataFrame(rows, columns=[
+def buys_frame(rows, titles=None):
+    df = pd.DataFrame(rows, columns=[
         "accession_no", "txn_seq", "shares", "value", "price_per_share",
         "transaction_date", "ticker"])
+    df["security_title"] = titles if titles else "Common Stock"
+    return df
 
 
 def test_momentum():
@@ -61,6 +63,27 @@ def test_below_market_flag():
     assert ctx["n_below_market"] == 1, ctx["n_below_market"]
 
 
+def test_preferred_excluded_from_vwap():
+    h = hist([100.0] * 300)
+    d = str(h["date"].iloc[250].date())
+    b = buys_frame([("P1", 0, 1000, 100_000, 100.0, d, "MIX"),
+                    ("P2", 0, 100, 100_000, 1000.0, d, "MIX")],
+                   titles=["Common Stock", "Series D Convertible Preferred Stock"])
+    ctx = market_context_for("MIX", b, get_history=lambda t: h)
+    assert ctx["entry_vwap"] == 100.0, "preferred trade must not pollute the VWAP"
+
+
+def test_foreign_price_not_comparable():
+    h = hist([100.0] * 300)
+    d = str(h["date"].iloc[250].date())
+    # As-filed at 3.7 vs USD close 100 (foreign listing) -> excluded everywhere
+    b = buys_frame([("F1", 0, 10_000, 37_000, 3.7, d, "FRN"),
+                    ("F2", 0, 1000, 99_000, 99.0, d, "FRN")])
+    ctx = market_context_for("FRN", b, get_history=lambda t: h)
+    assert ctx["n_below_market"] == 0, "non-comparable price must not flag below-mkt"
+    assert ctx["entry_vwap"] == 99.0
+
+
 def test_breadth():
     conn = db.connect(Path(":memory:"))
     days = pd.bdate_range("2026-06-01", periods=30)
@@ -97,5 +120,7 @@ if __name__ == "__main__":
     test_value_below_ma_not_actionable()
     test_value_reclaimed_ma_actionable()
     test_below_market_flag()
+    test_preferred_excluded_from_vwap()
+    test_foreign_price_not_comparable()
     test_breadth()
     print("all classify/breadth tests passed")

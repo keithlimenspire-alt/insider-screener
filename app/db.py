@@ -97,7 +97,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     ):
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         if column not in cols:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            except sqlite3.OperationalError as e:
+                # A concurrent connection won the check-then-alter race.
+                if "duplicate column name" not in str(e).lower():
+                    raise
 
 
 def connect(db_path: Path = config.DB_PATH) -> sqlite3.Connection:

@@ -32,10 +32,13 @@ GROUP BY d, is_buy
 
 
 def breadth_series(conn: sqlite3.Connection, lookback_days: int = 150) -> pd.DataFrame:
-    """Rolling unscheduled-buy share, one row per trading day with data."""
+    """Rolling unscheduled-buy share, one row per trading day with data.
+
+    Queries a ~30-day warm-up before the display window so the first plotted
+    points are true full windows, not query-cutoff artifacts."""
     today = date.today()
     df = pd.read_sql_query(_SQL, conn, params={
-        "start": (today - timedelta(days=lookback_days)).isoformat(),
+        "start": (today - timedelta(days=lookback_days + 30)).isoformat(),
         "today": today.isoformat(),
     })
     if df.empty:
@@ -54,6 +57,7 @@ def breadth_series(conn: sqlite3.Connection, lookback_days: int = 150) -> pd.Dat
         "sells": daily["sells"].values,
         "buy_share": (roll["buys"] / (roll["buys"] + roll["sells"]) * 100).values,
     })
+    out = out[out["date"] >= pd.Timestamp(today - timedelta(days=lookback_days))]
     return out.dropna(subset=["buy_share"]).reset_index(drop=True)
 
 
@@ -62,7 +66,7 @@ def breadth_label(share: float) -> str:
         return "very bullish"
     if share >= config.BREADTH_BULLISH_PCT:
         return "bullish"
-    if share >= config.BREADTH_BULLISH_PCT - 8:
+    if share >= config.BREADTH_NEUTRAL_FLOOR_PCT:
         return "neutral"
     return "weak"
 
