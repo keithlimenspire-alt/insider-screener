@@ -16,27 +16,7 @@ SELECT t.accession_no, t.txn_seq, t.n_owners, t.insider_name, t.insider_cik,
        t.transaction_date, t.shares, t.price_per_share, t.value,
        t.shares_owned_after, t.direct_indirect, t.security_title,
        f.ticker, f.cik, f.company_name, f.filed_at, f.filing_url,
-       -- §5/§6 option-exercise trap ("the Starbucks trap"): the same insider
-       -- filed both an M (exercise) and an S (sale) line for THIS issuer on
-       -- the same day this buy was filed — the "buy" is likely
-       -- exercise-related, not conviction.
-       (EXISTS (SELECT 1 FROM transactions m
-                JOIN filings mf ON mf.accession_no = m.accession_no
-                WHERE m.insider_cik = t.insider_cik AND mf.filed_at = f.filed_at
-                  AND mf.cik = f.cik AND m.transaction_code = 'M')
-        AND
-        EXISTS (SELECT 1 FROM transactions s
-                JOIN filings sf ON sf.accession_no = s.accession_no
-                WHERE s.insider_cik = t.insider_cik AND sf.filed_at = f.filed_at
-                  AND sf.cik = f.cik AND s.transaction_code = 'S')) AS exercise_flag,
-       -- §3 first-time buyer: no open-market buy of this issuer on record
-       -- before the current window. Only as good as accumulated DB history.
-       (NOT EXISTS (SELECT 1 FROM transactions p
-                JOIN filings pf ON pf.accession_no = p.accession_no
-                WHERE p.insider_cik = t.insider_cik AND pf.cik = f.cik
-                  AND p.transaction_code = 'P' AND p.acquired_disposed = 'A'
-                  AND p.is_derivative = 0
-                  AND p.transaction_date < :cutoff)) AS first_time
+       f.aff_10b5_one, t.footnotes
 FROM transactions t
 JOIN filings f ON f.accession_no = t.accession_no
 WHERE t.transaction_code = 'P'          -- open-market purchase…
@@ -150,6 +130,59 @@ def assign_buying_units(buys: pd.DataFrame) -> pd.Series:
 
 # --------------------------------------------------------------- load buys
 
+def _flag_inputs(conn: sqlite3.Connection, cutoff: date) -> dict:
+    """Set-based inputs for the per-row judgement flags.
+
+    Computed as whole-table passes and merged in pandas rather than as
+    correlated EXISTS subqueries — with a few hundred thousand transaction
+    rows the correlated form degenerated into per-row scans of filings
+    (minutes instead of milliseconds), and set membership is planner-proof."""
+    regime_start = (cutoff - timedelta(days=config.REGIME_LOOKBACK_DAYS)).isoformat()
+    cut = cutoff.isoformat()
+    q = conn.execute
+    # V2 §B offering tell: filings whose derivative table carries warrants.
+    warrant_accs = {r[0] for r in q(
+        """SELECT DISTINCT accession_no FROM transactions
+           WHERE is_derivative = 1
+             AND lower(coalesce(security_title, '')) LIKE '%warrant%'""")}
+    # §5/§6 exercise trap: (insider, filed day, issuer) with an M and an S line.
+    def _code_days(code: str) -> set:
+        return {(r[0], r[1], r[2]) for r in q(
+            """SELECT DISTINCT t.insider_cik, f.filed_at, f.cik
+               FROM transactions t JOIN filings f ON f.accession_no = t.accession_no
+               WHERE t.transaction_code = ? AND t.insider_cik IS NOT NULL""", (code,))}
+    exercise_keys = _code_days("M") & _code_days("S")
+    # V2 §B regime flip inputs + §3 first-time input: (insider, issuer) sets.
+    def _pairs(sql: str, *params) -> set:
+        return {(r[0], r[1]) for r in q(sql, params)}
+    lookback_sellers = _pairs(
+        """SELECT DISTINCT t.insider_cik, f.cik
+           FROM transactions t JOIN filings f ON f.accession_no = t.accession_no
+           WHERE t.transaction_code = 'S' AND t.acquired_disposed = 'D'
+             AND t.is_derivative = 0 AND t.insider_cik IS NOT NULL
+             AND t.transaction_date >= ? AND t.transaction_date < ?""",
+        regime_start, cut)
+    lookback_buyers = _pairs(
+        """SELECT DISTINCT t.insider_cik, f.cik
+           FROM transactions t JOIN filings f ON f.accession_no = t.accession_no
+           WHERE t.transaction_code = 'P' AND t.acquired_disposed = 'A'
+             AND t.is_derivative = 0 AND t.insider_cik IS NOT NULL
+             AND t.transaction_date >= ? AND t.transaction_date < ?""",
+        regime_start, cut)
+    prior_buyers = _pairs(
+        """SELECT DISTINCT t.insider_cik, f.cik
+           FROM transactions t JOIN filings f ON f.accession_no = t.accession_no
+           WHERE t.transaction_code = 'P' AND t.acquired_disposed = 'A'
+             AND t.is_derivative = 0 AND t.insider_cik IS NOT NULL
+             AND t.transaction_date < ?""", cut)
+    return {
+        "warrant_accs": warrant_accs,
+        "exercise_keys": exercise_keys,
+        "regime_flip_keys": lookback_sellers - lookback_buyers,
+        "prior_buyers": prior_buyers,
+    }
+
+
 def load_qualifying_buys(conn: sqlite3.Connection, window_days: int,
                          min_value: float, as_of: date | None = None) -> pd.DataFrame:
     """Qualifying open-market buys in-window, with per-row judgement columns."""
@@ -160,6 +193,13 @@ def load_qualifying_buys(conn: sqlite3.Connection, window_days: int,
     })
     if df.empty:
         return df
+    flags = _flag_inputs(conn, cutoff)
+    ins_day_iss = list(zip(df["insider_cik"], df["filed_at"], df["cik"]))
+    ins_iss = list(zip(df["insider_cik"], df["cik"]))
+    df["warrant_pair"] = df["accession_no"].isin(flags["warrant_accs"]).astype(int)
+    df["exercise_flag"] = [int(k in flags["exercise_keys"]) for k in ins_day_iss]
+    df["regime_flip"] = [int(k in flags["regime_flip_keys"]) for k in ins_iss]
+    df["first_time"] = [int(k not in flags["prior_buyers"]) for k in ins_iss]
     df["acquired_disposed"] = "A"  # column not selected; needed by _add_trade_pct
     df = _add_trade_pct(df)
     df["role"] = df.apply(short_role, axis=1)
@@ -172,10 +212,31 @@ def load_qualifying_buys(conn: sqlite3.Connection, window_days: int,
     # §5 fund noise: 10%-owner buying a tiny fraction of an existing stake, OR
     # with inconsistent/unknown holdings reporting ("de-weight, don't
     # auto-trust"). A genuine new position (prior == 0) is not noise.
+    # V2 carve-out: applies ONLY to 10%-owners/institutions, never individuals.
     tiny = df["trade_pct"].notna() & (df["trade_pct"] < config.FUND_NOISE_MAX_TRADE_PCT)
     inconsistent = df["prior_shares"].isna() | (df["prior_shares"] < 0)
     df["fund_noise"] = (df["is_ten_percent_owner"] == 1) & (tiny | inconsistent)
     df["unit"] = assign_buying_units(df)
+
+    # ---- V2 §B low-signal exclusions (nuke before scoring) ----
+    fn = df["footnotes"].map(lambda s: s.lower() if isinstance(s, str) else "")
+    # Scheduled trades: the 10b5-1 checkbox or a plan footnote.
+    df["scheduled"] = (df["aff_10b5_one"] == 1) | fn.str.contains("10b5-1", regex=False)
+    # Plan purchases: DRIP / 401(k) / ESPP mechanics, not conviction buys.
+    df["plan_buy"] = (fn.str.contains("dividend reinvest", regex=False)
+                      | fn.str.contains("401(k)", regex=False)
+                      | fn.str.contains("employee stock purchase", regex=False)
+                      | fn.str.contains("espp", regex=False))
+    # Offerings/placements: warrant-paired shares, or multiple independent
+    # buying units at one identical round-dollar price.
+    same_price_units = df.groupby(
+        ["ticker", "transaction_date", "price_per_share"])["unit"].transform("nunique")
+    round_price = df["price_per_share"].notna() & (df["price_per_share"] % 1 == 0)
+    df["offering"] = (df["warrant_pair"] == 1) | (
+        (same_price_units >= config.OFFERING_MIN_SAME_PRICE_UNITS) & round_price)
+    df["low_signal"] = df["scheduled"] | df["plan_buy"] | df["offering"]
+    # V2 §B: ~10% position increase is the "notable" line for an individual.
+    df["notable"] = df["trade_pct"].notna() & (df["trade_pct"] >= config.NOTABLE_TRADE_PCT)
     return df
 
 
@@ -218,6 +279,7 @@ def compute_clusters(buys: pd.DataFrame, min_cluster: int,
                      as_of: date | None = None,
                      routine_months: dict[str, int] | None = None,
                      excluded_counts: dict[str, int] | None = None,
+                     lowsig_counts: dict[str, int] | None = None,
                      include_solo_gc: bool = True) -> pd.DataFrame:
     """One row per ticker with >= min_cluster independent buying units in-window
     (§2). Solo General-Counsel buys are kept regardless — §4 rates GC high
@@ -227,6 +289,7 @@ def compute_clusters(buys: pd.DataFrame, min_cluster: int,
     as_of = as_of or date.today()
     routine_months = routine_months or {}
     excluded_counts = excluded_counts or {}
+    lowsig_counts = lowsig_counts or {}
 
     # Any owner's fund-noise flag marks the whole economic trade.
     trade_noise = buys.groupby(["accession_no", "txn_seq"])["fund_noise"].transform("max")
@@ -251,6 +314,14 @@ def compute_clusters(buys: pd.DataFrame, min_cluster: int,
     unit_ft = buys.groupby(["ticker", "unit"])["first_time"].min()
     insiders["n_first_time"] = (unit_ft[unit_ft == 1].groupby("ticker").count()
                                 .reindex(insiders.index).fillna(0).astype(int))
+    # V2 §B: buying units whose members flipped from selling to buying.
+    unit_rf = buys.groupby(["ticker", "unit"])["regime_flip"].max()
+    insiders["n_regime_flip"] = (unit_rf[unit_rf == 1].groupby("ticker").count()
+                                 .reindex(insiders.index).fillna(0).astype(int))
+    # V2 §B: units with a notable (≥10% position-increase) buy.
+    unit_nt = buys.groupby(["ticker", "unit"])["notable"].max()
+    insiders["n_notable"] = (unit_nt[unit_nt].groupby("ticker").count()
+                             .reindex(insiders.index).fillna(0).astype(int))
 
     money = trades.groupby("ticker").agg(
         total_value=("value", "sum"),
@@ -282,13 +353,19 @@ def compute_clusters(buys: pd.DataFrame, min_cluster: int,
         lambda t: routine_months.get(t, 0) >= config.ROUTINE_MIN_DISTINCT_MONTHS)
     out["n_exercise_excluded"] = out["ticker"].map(
         lambda t: excluded_counts.get(t, 0)).astype(int)
+    out["n_lowsig_excluded"] = out["ticker"].map(
+        lambda t: lowsig_counts.get(t, 0)).astype(int)
 
     def _flags(row) -> str:
         f = []
         if row["solo_gc"]:
             f.append("solo-GC")
+        if row["n_regime_flip"]:
+            f.append(f"regime-flip×{row['n_regime_flip']}")
         if row["n_exercise_excluded"]:
             f.append(f"exercise×{row['n_exercise_excluded']}")
+        if row["n_lowsig_excluded"]:
+            f.append(f"lowsig×{row['n_lowsig_excluded']}")
         if row["fund_noise"]:
             f.append("fund-noise")
         if row["stale"]:
@@ -306,26 +383,43 @@ def compute_clusters(buys: pd.DataFrame, min_cluster: int,
 
 def build_screen(conn: sqlite3.Connection, window_days: int, min_value: float,
                  min_cluster: int, include_exercise_flagged: bool = False,
-                 include_solo_gc: bool = True,
+                 include_low_signal: bool = False, include_solo_gc: bool = True,
                  as_of: date | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Full screener pipeline: load → exclude exercise-flagged trades (§5) →
-    cluster by buying unit. Returns (clusters, kept_buys)."""
+    """Full screener pipeline: load → exclude exercise-flagged (§5) and
+    low-signal (V2 §B: 10b5-1 / plan / offering) trades → cluster by buying
+    unit. Returns (clusters, kept_buys)."""
     as_of = as_of or date.today()
     buys = load_qualifying_buys(conn, window_days, min_value, as_of=as_of)
     if buys.empty:
         return pd.DataFrame(), buys
+
+    def _trade_counts(frame: pd.DataFrame) -> dict[str, int]:
+        return (frame.drop_duplicates(subset=["accession_no", "txn_seq"])
+                .groupby("ticker").size().to_dict())
+
     # One flagged owner taints the whole economic trade — exclude it entirely,
     # and count exclusions in trades, not owner-rows.
-    trade_flag = buys.groupby(["accession_no", "txn_seq"])["exercise_flag"].transform("max")
-    excluded = buys[trade_flag == 1]
-    kept = buys if include_exercise_flagged else buys[trade_flag == 0]
-    excluded_counts = ({} if include_exercise_flagged else
-                       excluded.drop_duplicates(subset=["accession_no", "txn_seq"])
-                       .groupby("ticker").size().to_dict())
+    exercise_trade = buys.groupby(
+        ["accession_no", "txn_seq"])["exercise_flag"].transform("max") == 1
+    lowsig_trade = buys.groupby(
+        ["accession_no", "txn_seq"])["low_signal"].transform("max")
+
+    drop = pd.Series(False, index=buys.index)
+    excluded_counts: dict[str, int] = {}
+    lowsig_counts: dict[str, int] = {}
+    if not include_exercise_flagged:
+        drop |= exercise_trade
+        excluded_counts = _trade_counts(buys[exercise_trade])
+    if not include_low_signal:
+        drop |= lowsig_trade
+        lowsig_counts = _trade_counts(buys[lowsig_trade & ~exercise_trade])
+    kept = buys[~drop]
+
     cutoff = as_of - timedelta(days=window_days)
     cl = compute_clusters(kept, min_cluster, as_of=as_of,
                           routine_months=ticker_buy_months(conn, before=cutoff),
                           excluded_counts=excluded_counts,
+                          lowsig_counts=lowsig_counts,
                           include_solo_gc=include_solo_gc)
     return cl, kept
 

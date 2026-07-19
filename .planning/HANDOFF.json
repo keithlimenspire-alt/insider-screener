@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "timestamp": "2026-07-19T08:25:59.018Z",
+  "timestamp": "2026-07-19T09:06:05.500Z",
   "source": "auto-postool",
   "partial": false,
   "phase": null,
@@ -22,9 +22,57 @@
     },
     {
       "status": "M",
+      "path": "README.md"
+    },
+    {
+      "status": "M",
       "path": "app/clusters.py"
+    },
+    {
+      "status": "M",
+      "path": "app/config.py"
+    },
+    {
+      "status": "M",
+      "path": "app/db.py"
+    },
+    {
+      "status": "M",
+      "path": "app/edgar.py"
+    },
+    {
+      "status": "M",
+      "path": "app/ingest.py"
+    },
+    {
+      "status": "M",
+      "path": "app/parse.py"
+    },
+    {
+      "status": "M",
+      "path": "dashboard.py"
+    },
+    {
+      "status": "M",
+      "path": "tests/test_strategy.py"
+    },
+    {
+      "status": "??",
+      "path": "Insider-Buying-Strategy-20260719-V2.md"
+    },
+    {
+      "status": "??",
+      "path": "app/breadth.py"
+    },
+    {
+      "status": "??",
+      "path": "app/classify.py"
+    },
+    {
+      "status": "??",
+      "path": "tests/test_classify.py"
     }
   ],
   "next_action": null,
-  "context_notes": "Recent commits:\nccf6567 Fix 24 confirmed Phase 2-4 review findings\nef848a3 Document Phases 2-4 in README; timezone-honest scheduler comment; busy_timeout\ne3305ee Phases 2-4: judgement layer, context layer, always-on\nfe4b573 Reject ticker placeholders; primary listing wins in CIK-ticker map\n1e57aac Replace deprecated use_container_width with width=stretch"
+  "context_notes": "Recent commits:\n1003ba8 Add per-insider drill-down: Insiders summary tab + insider filter\nccf6567 Fix 24 confirmed Phase 2-4 review findings\nef848a3 Document Phases 2-4 in README; timezone-honest scheduler comment; busy_timeout\ne3305ee Phases 2-4: judgement layer, context layer, always-on\nfe4b573 Reject ticker placeholders; primary listing wins in CIK-ticker map"
 }

@@ -2,11 +2,13 @@
 
 Run with:  streamlit run dashboard.py
 """
+from datetime import date, timedelta
+
 import altair as alt
 import pandas as pd
 import streamlit as st
 
-from app import alerts, clusters, config, db, edgar, prices
+from app import alerts, breadth, classify, clusters, config, db, edgar, prices
 
 st.set_page_config(page_title="Insider-Buying Screener", page_icon="📈", layout="wide")
 
@@ -16,14 +18,30 @@ st.set_page_config(page_title="Insider-Buying Screener", page_icon="📈", layou
 
 @st.cache_data(ttl=300)
 def get_screen(window_days: int, min_value: float, min_cluster: int,
-               include_exercise: bool, solo_gc: bool) -> tuple[pd.DataFrame, pd.DataFrame]:
+               include_exercise: bool, include_lowsig: bool,
+               solo_gc: bool) -> tuple[pd.DataFrame, pd.DataFrame]:
     conn = db.connect()
     try:
         return clusters.build_screen(conn, window_days, min_value, min_cluster,
                                      include_exercise_flagged=include_exercise,
+                                     include_low_signal=include_lowsig,
                                      include_solo_gc=solo_gc)
     finally:
         conn.close()
+
+
+@st.cache_data(ttl=3600)
+def get_breadth() -> dict | None:
+    conn = db.connect()
+    try:
+        return breadth.current_breadth(conn)
+    finally:
+        conn.close()
+
+
+@st.cache_data(ttl=86400)
+def get_first_insider_filing(cik: str) -> str | None:
+    return edgar.first_insider_filing_date(cik)
 
 
 @st.cache_data(ttl=300)
@@ -119,6 +137,11 @@ include_exercise = st.sidebar.checkbox(
     "Include exercise-flagged buys", value=False,
     help="§5 Starbucks trap: buys by insiders who filed an option exercise (M) "
          "and a sale (S) at this issuer the same day are excluded by default.")
+include_lowsig = st.sidebar.checkbox(
+    "Include low-signal buys", value=False,
+    help="V2 §B: 10b5-1 scheduled trades, DRIP/401(k)/ESPP plan purchases, and "
+         "offering/placement buys (warrant-paired or ≥3 buyers at one identical "
+         "round price) are excluded by default.")
 solo_gc = st.sidebar.checkbox(
     "Include solo GC buys", value=True,
     help="§4: a General Counsel buying is a high signal even alone — kept on "
@@ -127,9 +150,10 @@ solo_gc = st.sidebar.checkbox(
 st.sidebar.divider()
 st.sidebar.subheader("Market data (yfinance)")
 price_context = st.sidebar.checkbox(
-    "Near-highs context", value=False,
-    help="§3: fetch price history per screened ticker and show % below the "
-         "trailing 3-year high. First fetch takes ~1s per ticker, then cached.")
+    "Market context (type + entry gate)", value=True,
+    help="V2 §A/§B: classify each cluster value vs momentum, apply the 50-day "
+         "MA entry gate, and show % below high / discount to insider entry. "
+         "First fetch ~1s per ticker, then cached ~20h.")
 cap_choice = st.sidebar.selectbox(
     "Market-cap cap", ["Any", "≤ $500M", "≤ $2B", "≤ $10B", "≤ $50B"],
     help="Filters screened tickers by market cap (fetched per ticker, cached daily).")
@@ -149,6 +173,30 @@ st.caption("Open-market insider purchases (Form 4, code P/A, non-derivative) "
            "clustered per ticker, with the §4–§5 judgement layer. "
            "Screening tool only — no trade execution, no exit logic.")
 
+# V2 §B market-wide breadth gauge: a top-down "should I be buying anything
+# right now" overlay computed from the full Form 4 firehose.
+b = get_breadth()
+if b:
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        st.metric(f"Unscheduled-buy share ({config.BREADTH_WINDOW_DAYS}d)",
+                  f"{b['buy_share']:.0f}%", b["label"], delta_color="off",
+                  help="V2 §B: share of buys among unscheduled (non-10b5-1) "
+                       "insider trades, market-wide. Normally ~33%. Above "
+                       f"{config.BREADTH_BULLISH_PCT:.0f}% historically bullish; "
+                       f"above {config.BREADTH_VERY_BULLISH_PCT:.0f}% very bullish "
+                       "(COVID ~60%, 2022 bottom ~55%).")
+    with c2:
+        with st.expander(f"Breadth history (as of {b['as_of']})"):
+            s = b["series"]
+            line = alt.Chart(s).mark_line(color="#4c78a8").encode(
+                x=alt.X("date:T", title=None),
+                y=alt.Y("buy_share:Q", title="Buy share %", scale=alt.Scale(domain=[0, 100])))
+            rules = alt.Chart(pd.DataFrame({
+                "y": [config.BREADTH_BULLISH_PCT, config.BREADTH_VERY_BULLISH_PCT]
+            })).mark_rule(strokeDash=[4, 4], color="#888").encode(y="y:Q")
+            st.altair_chart(alt.layer(line, rules), width="stretch")
+
 recent = get_recent_alerts()
 if recent:
     with st.expander(f"🔔 Alerts ({len(recent)} recent)"):
@@ -156,7 +204,7 @@ if recent:
             st.write(f"`{ts}` **{kind}** — {message}")
 
 df, kept_buys = get_screen(window_days, float(min_value), min_cluster,
-                           include_exercise, solo_gc)
+                           include_exercise, include_lowsig, solo_gc)
 
 if exclude_otc and not df.empty:
     exch = get_cik_exchange_map()
@@ -179,17 +227,24 @@ if not df.empty and cap_limit is not None:
     df = df[df["market_cap"].isna() | (df["market_cap"] <= cap_limit)].copy()
 
 if not df.empty and price_context:
-    prog = st.progress(0.0, text="Fetching price history…")
-    below = {}
-    tickers = list(df["ticker"])
-    for i, t in enumerate(tickers):
-        nh = get_near_high(t)
-        below[t] = nh[1] if nh else None
-        prog.progress((i + 1) / len(tickers), text=f"Price history: {t}")
+    # V2 §A/§B: classify value vs momentum, apply the 50-day entry gate, and
+    # attach discount-to-entry + below-market tells.
+    prog = st.progress(0.0, text="Fetching market context…")
+    df = classify.enrich_clusters(
+        df, kept_buys,
+        progress=lambda frac, t: prog.progress(frac, text=f"Market context: {t}"))
     prog.empty()
-    df["pct_below_high"] = df["ticker"].map(below)
-    df["near_high"] = df["pct_below_high"].notna() & (
-        df["pct_below_high"] <= config.NEAR_HIGH_MAX_PCT_BELOW)
+
+    # V2 §B FPI/new-reporter: first insider filing < 12 months → history-based
+    # signals (first-time, routine) are artifacts of the reporting change.
+    cutoff_new = (date.today() - timedelta(days=config.NEW_REPORTER_MONTHS * 30)).isoformat()
+    first_dates = {c: get_first_insider_filing(str(c)) for c in df["cik"].unique()}
+    new_rep = df["cik"].map(lambda c: (first_dates.get(c) or "") > cutoff_new)
+    if new_rep.any():
+        df.loc[new_rep, "n_first_time"] = None
+        df.loc[new_rep, "routine"] = False
+        df.loc[new_rep, "flags"] = (df.loc[new_rep, "flags"] + ", new-reporter"
+                                    ).str.strip(", ")
 
 if df.empty:
     st.info("No clusters match the current filters. Widen the window, lower the "
@@ -197,11 +252,10 @@ if df.empty:
     st.stop()
 
 cols = ["ticker", "company", "n_insiders", "n_filers", "n_buys", "total_value",
-        "largest_buy", "role_score", "max_trade_pct", "n_conviction", "n_first_time",
-        "days_since_first", "days_since_last", "roles", "flags"]
+        "largest_buy", "role_score", "max_trade_pct", "n_conviction", "n_notable",
+        "n_first_time", "days_since_first", "days_since_last", "roles", "flags"]
 if price_context:
-    cols.insert(2, "near_high")
-    cols.insert(3, "pct_below_high")
+    cols[2:2] = ["trade_type", "actionable", "pct_below_high", "discount_to_entry_pct"]
 if cap_limit is not None:
     cols.insert(2, "market_cap")
 show = df[cols]
@@ -218,13 +272,30 @@ event = st.dataframe(
         "market_cap": st.column_config.NumberColumn(
             "Mkt cap", format="$%.0f",
             help="From Yahoo Finance; clusters with unknown caps stay visible."),
-        "near_high": st.column_config.CheckboxColumn(
-            "Near high",
-            help=f"§3: within {config.NEAR_HIGH_MAX_PCT_BELOW:.0f}% of the trailing "
-                 f"{config.PRICE_HISTORY_YEARS}-year high"),
+        "trade_type": st.column_config.TextColumn(
+            "Type",
+            help="V2 §A: momentum = near multi-year highs (strength is the "
+                 "signal) · value = down from highs (discount + patience). "
+                 "Catalyst trades need event data and stay a manual call. "
+                 "Blank = no price history."),
+        "actionable": st.column_config.CheckboxColumn(
+            "Actionable",
+            help=f"V2 §B 50-day rule: value trades wait until price reclaims the "
+                 f"{config.MA_GATE_DAYS}-day MA (insiders are chronically early); "
+                 "momentum trades are actionable by definition. Judgement aid, "
+                 "not advice."),
         "pct_below_high": st.column_config.NumberColumn(
             "% below high", format="%.1f%%",
             help=f"§3: distance below the trailing {config.PRICE_HISTORY_YEARS}-year high"),
+        "discount_to_entry_pct": st.column_config.NumberColumn(
+            "Disc. to entry", format="%.1f%%",
+            help="V2 §A value branch: how far the price sits below the cluster's "
+                 "volume-weighted insider entry (positive = you can buy cheaper "
+                 "than the insiders did)"),
+        "n_notable": st.column_config.NumberColumn(
+            "# notable",
+            help=f"V2 §B: buying units that grew their stake ≥"
+                 f"{config.NOTABLE_TRADE_PCT:.0f}%"),
         "n_insiders": st.column_config.NumberColumn(
             "# insiders",
             help="Independent buying units: co-filers of one joint Form 4 (a fund "
@@ -254,12 +325,16 @@ event = st.dataframe(
         "flags": st.column_config.TextColumn(
             "Flags", width="medium",
             help="solo-GC = General Counsel buying alone (§4 keeps it) · "
-                 "exercise×N = N trades excluded for same-day M+S (§5) · fund-noise = "
+                 "regime-flip×N = units that only sold last year, now buying (V2) · "
+                 "exercise×N = trades excluded for same-day M+S (§5) · "
+                 "lowsig×N = trades excluded as 10b5-1/plan/offering (V2) · "
+                 "below-mkt×N = buys ≥5% under that day's close (V2) · fund-noise = "
                  ">50% of $ from 10%-owners buying <2% of their stake (§5) · stale = "
                  f"last buy >{config.STALE_AFTER_DAYS}d ago (§5) · routine = buys in "
                  f"≥{config.ROUTINE_MIN_DISTINCT_MONTHS} distinct months in the year "
-                 "before the window (§3) · all-noise-sized = every buy in the "
-                 "$3k–$15k 401(k)/ESPP band (§4)"),
+                 "before the window (§3) · new-reporter = first insider filing "
+                 "<12 months, history signals suppressed (V2) · all-noise-sized = "
+                 "every buy in the $3k–$15k 401(k)/ESPP band (§4)"),
     },
 )
 st.caption(f"{len(df)} cluster(s) · window {window_days}d · min buy ${min_value:,.0f} · "
@@ -410,14 +485,14 @@ if pick:
 
     with tab_record:
         buys_hist = get_buy_history(pick)
+        nh = get_near_high(pick)
+        last_close = nh[0] if nh else None
         if buys_hist.empty:
             st.info("No recorded open-market buys for this ticker.")
         else:
-            nh = get_near_high(pick)
             rec = buys_hist[["insider_name", "transaction_date", "shares",
                              "price_per_share", "value"]].copy()
-            if nh:
-                last_close = nh[0]
+            if last_close:
                 rec["pct_since_buy"] = (last_close - rec["price_per_share"]) \
                     / rec["price_per_share"] * 100.0
                 st.caption(f"Return measured against the last close (${last_close:,.2f}). "
@@ -437,5 +512,41 @@ if pick:
                         "% since buy", format="%.1f%%",
                         help="§3 insider track record: price change from that buy "
                              "to the last close"),
+                },
+            )
+
+        # V2 §B sell-side track record: do their sells precede drops?
+        sells = get_ticker_txns(pick)
+        sells = sells[(sells["transaction_code"] == "S")
+                      & (sells["acquired_disposed"] == "D")
+                      & (sells["is_derivative"] == 0)
+                      & sells["price_per_share"].notna()
+                      & (sells["price_per_share"] > 0)]
+        sells = sells.drop_duplicates(subset=["accession_no", "txn_seq"])
+        if not sells.empty:
+            st.subheader("Sell-side record")
+            sv = sells[["insider_name", "role", "transaction_date", "shares",
+                        "price_per_share", "value"]].copy()
+            if last_close:
+                # Negative = stock fell after the sell = a well-timed sell.
+                sv["pct_since_sell"] = (last_close - sv["price_per_share"]) \
+                    / sv["price_per_share"] * 100.0
+            st.dataframe(
+                sv.sort_values("transaction_date", ascending=False),
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "insider_name": st.column_config.TextColumn("Insider", width="medium"),
+                    "role": st.column_config.TextColumn("Role"),
+                    "transaction_date": st.column_config.TextColumn("Sell date"),
+                    "shares": st.column_config.NumberColumn("Shares", format="%.0f"),
+                    "price_per_share": st.column_config.NumberColumn("Sell price",
+                                                                     format="$%.2f"),
+                    "value": st.column_config.NumberColumn("Value", format="$%.0f"),
+                    "pct_since_sell": st.column_config.NumberColumn(
+                        "% since sell", format="%.1f%%",
+                        help="V2 §B: price move since the sell — negative means "
+                             "the stock fell afterwards (a well-timed sell; "
+                             "reward insiders whose sells precede drops)"),
                 },
             )

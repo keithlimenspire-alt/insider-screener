@@ -52,3 +52,18 @@ ROUTINE_LOOKBACK_DAYS = 365          # …counted in the year BEFORE the window
 PRICE_HISTORY_YEARS = 3              # trailing window for the multi-year high
 PRICE_CACHE_DIR = CACHE_DIR / "prices"
 PRICE_CACHE_TTL_HOURS = 20.0
+
+# V2 upgrade (strategy doc 20260719) — every threshold configurable for the
+# eventual backtest sweep (V2 guardrail).
+NOTABLE_TRADE_PCT = 10.0             # V2 §B: ~10% position increase = notable
+REGIME_LOOKBACK_DAYS = 365           # V2 §B: sells-then-buy regime-flip window
+BELOW_MARKET_DISCOUNT_PCT = 5.0      # V2 §B: buy price ≥5% under market close
+OFFERING_MIN_SAME_PRICE_UNITS = 3    # V2 §B: ≥N buying units at one identical
+                                     # round price = offering/placement tell
+                                     # (2 is too common for genuine clusters)
+NEW_REPORTER_MONTHS = 12             # V2 §B: first insider filing younger than
+                                     # this = likely FPI conversion
+MA_GATE_DAYS = 50                    # V2 §B: 50-day MA entry gate (value branch)
+BREADTH_WINDOW_DAYS = 20             # V2 §B: rolling window, unscheduled-buy share
+BREADTH_BULLISH_PCT = 33.0           # V2 §B: above ~1/3 buys = bullish
+BREADTH_VERY_BULLISH_PCT = 50.0      # V2 §B: historically very bullish

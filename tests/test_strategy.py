@@ -14,25 +14,26 @@ AS_OF = date(2026, 7, 13)
 
 
 def seed(conn):
-    def filing(acc, cik, ticker, filed_at):
+    def filing(acc, cik, ticker, filed_at, aff=0):
         conn.execute(
             "INSERT INTO filings (accession_no, cik, company_name, ticker, filed_at,"
-            " period_of_report, filing_url) VALUES (?,?,?,?,?,?,?)",
-            (acc, cik, f"{ticker} Corp", ticker, filed_at, filed_at, "http://x"))
+            " period_of_report, filing_url, aff_10b5_one) VALUES (?,?,?,?,?,?,?,?)",
+            (acc, cik, f"{ticker} Corp", ticker, filed_at, filed_at, "http://x", aff))
 
     def txn(acc, seq, insider, code, ad, shares, price, after, deriv=0,
-            officer=0, title=None, director=0, tenpct=0, tdate=None, n_owners=1):
+            officer=0, title=None, director=0, tenpct=0, tdate=None, n_owners=1,
+            fn=None):
         conn.execute(
             """INSERT INTO transactions (accession_no, txn_seq, n_owners, is_derivative,
                insider_name, insider_cik, is_director, is_officer, officer_title,
                is_ten_percent_owner, transaction_date, transaction_code,
                acquired_disposed, shares, price_per_share, value, shares_owned_after,
-               direct_indirect, security_title)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               direct_indirect, security_title, footnotes)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (acc, seq, n_owners, deriv, f"Insider {insider}", insider, director,
              officer, title, tenpct, tdate, code, ad, shares, price,
              shares * price if shares and price is not None else None,
-             after, "D", "Common Stock"))
+             after, "D", "Common Stock", fn))
 
     # AAA: clean 2-insider cluster — GC ($250k, first-time) + CFO ($300k)
     filing("A1", "100", "AAA", "2026-07-01")
@@ -107,6 +108,29 @@ def seed(conn):
     filing("H4", "800", "HHH", "2026-07-02")
     txn("H4", 0, "h8b", "P", "A", 15_000, 20.0, 40_000, director=1, tdate="2026-07-02")
 
+    # III (V2): regime flip — i9a only SOLD in the lookback year, now buys
+    filing("I0", "900", "III", "2026-02-15")
+    txn("I0", 0, "i9a", "S", "D", 5_000, 22.0, 95_000, officer=1,
+        title="Chief Operating Officer", tdate="2026-02-15")
+    filing("I1", "900", "III", "2026-07-03")
+    txn("I1", 0, "i9a", "P", "A", 12_000, 21.0, 107_000, officer=1,
+        title="Chief Operating Officer", tdate="2026-07-03")
+    filing("I2", "900", "III", "2026-07-03")
+    txn("I2", 0, "i9b", "P", "A", 12_000, 21.5, 30_000, director=1, tdate="2026-07-03")
+
+    # JJJ (V2): scheduled — one buy carries a 10b5-1 plan footnote
+    filing("J1", "1000", "JJJ", "2026-07-06")
+    txn("J1", 0, "j10a", "P", "A", 11_000, 19.5, 40_000, director=1, tdate="2026-07-06",
+        fn="Shares purchased pursuant to a Rule 10b5-1 trading plan adopted 2026-03-01.")
+    filing("J2", "1000", "JJJ", "2026-07-06")
+    txn("J2", 0, "j10b", "P", "A", 11_000, 19.7, 40_000, director=1, tdate="2026-07-06")
+
+    # KKK (V2): offering tell — 3 independent units at one identical round price
+    for i, who in enumerate(("k11a", "k11b", "k11c")):
+        filing(f"K{i}", "1100", "KKK", "2026-07-07")
+        txn(f"K{i}", 0, who, "P", "A", 25_000, 10.0, 25_000, director=1,
+            tdate="2026-07-07")
+
     conn.commit()
 
 
@@ -175,6 +199,23 @@ def main():
     hhh = by["HHH"]
     assert hhh.routine and "routine" in hhh.flags
     assert hhh.n_first_time == 1, "h8a bought before the window -> not first-time"
+
+    # III (V2): regime-flip flag — i9a sold all of last year, now buys
+    iii = by["III"]
+    assert iii.n_regime_flip == 1 and "regime-flip×1" in iii.flags
+    assert hhh.n_regime_flip == 0, "prior buyer h8a is not a regime flip"
+
+    # JJJ (V2): the 10b5-1 scheduled buy is excluded -> only 1 clean unit left
+    assert "JJJ" not in by, "scheduled buy must not sustain the cluster"
+    # KKK (V2): 3 units at one identical round price = offering tell -> gone
+    assert "KKK" not in by, "offering-pattern buys must be excluded"
+    # DDD (2 units at same round price) stays — threshold is 3
+    assert "DDD" in by
+    # ...and both reappear when low-signal buys are included
+    cl_ls, _ = clusters.build_screen(conn, 60, 200_000, 2, as_of=AS_OF,
+                                     include_low_signal=True)
+    by_ls = {r.ticker: r for r in cl_ls.itertuples()}
+    assert "JJJ" in by_ls and "KKK" in by_ls
 
     # role weights
     assert clusters.role_weight("GC") == 1.0

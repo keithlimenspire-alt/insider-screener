@@ -53,6 +53,7 @@ def _rows_for(accession_no: str, filed_at: str, parsed: dict,
         "filed_at": filed_at,
         "period_of_report": parsed["period_of_report"],
         "filing_url": f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_nodash}/{accession_no}-index.htm",
+        "aff_10b5_one": parsed.get("aff_10b5_one", 0),
     }
     owners = parsed["owners"] or [{
         "cik": None, "name": None, "is_director": 0, "is_officer": 0,
@@ -78,7 +79,7 @@ def _rows_for(accession_no: str, filed_at: str, parsed: dict,
                 **{k: txn[k] for k in (
                     "txn_seq", "is_derivative", "security_title", "transaction_date",
                     "transaction_code", "acquired_disposed", "shares", "price_per_share",
-                    "value", "shares_owned_after", "direct_indirect",
+                    "value", "shares_owned_after", "direct_indirect", "footnotes",
                 )},
             })
     return filing, rows

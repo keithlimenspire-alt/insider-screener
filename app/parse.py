@@ -84,6 +84,9 @@ def parse_form4(submission_text: str) -> dict:
     }
 
     remarks = _find_text(root, "remarks")
+    # Footnote texts, joined per transaction below — they carry the 10b5-1 /
+    # DRIP / offering tells the V2 judgement layer keys on.
+    footnotes = {fn.get("id"): _text(fn) for fn in root.findall("footnotes/footnote")}
     owners = []
     for ro in root.findall("reportingOwner"):
         rel = ro.find("reportingOwnerRelationship")
@@ -108,7 +111,11 @@ def parse_form4(submission_text: str) -> dict:
         for tx in root.findall(table_path):
             shares = _num(_value(tx, "transactionAmounts/transactionShares"))
             price = _num(_value(tx, "transactionAmounts/transactionPricePerShare"))
+            fn_ids = [el.get("id") for el in tx.iter("footnoteId")]
+            fn_text = "; ".join(dict.fromkeys(
+                footnotes[i] for i in fn_ids if footnotes.get(i)))
             txns.append({
+                "footnotes": fn_text or None,
                 "txn_seq": seq,
                 "is_derivative": is_derivative,
                 "security_title": _value(tx, "securityTitle"),
@@ -127,6 +134,8 @@ def parse_form4(submission_text: str) -> dict:
 
     return {
         "document_type": _find_text(root, "documentType"),
+        # Rule 10b5-1(c) plan checkbox (X0609+; absent in X0306 → 0).
+        "aff_10b5_one": _flag(_find_text(root, "aff10b5One")),
         "period_of_report": _date(_find_text(root, "periodOfReport")),
         "issuer": issuer,
         "owners": owners,

@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS filings (
     ticker           TEXT,
     filed_at         TEXT NOT NULL,          -- date the form hit EDGAR (from daily index)
     period_of_report TEXT,
-    filing_url       TEXT
+    filing_url       TEXT,
+    aff_10b5_one     INTEGER NOT NULL DEFAULT 0  -- Rule 10b5-1 plan checkbox
 );
 
 -- One row per (transaction line x reporting owner). Joint filings (e.g. a fund
@@ -39,6 +40,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     shares_owned_after   REAL,
     direct_indirect      TEXT,               -- D / I
     security_title       TEXT,
+    footnotes            TEXT,               -- joined footnote texts for this line
     UNIQUE (accession_no, txn_seq, insider_cik)
 );
 
@@ -79,7 +81,23 @@ CREATE INDEX IF NOT EXISTS idx_txn_accession ON transactions (accession_no);
 CREATE INDEX IF NOT EXISTS idx_filings_ticker ON filings (ticker);
 -- Serves the option-exercise-trap and first-time-buyer correlated subqueries.
 CREATE INDEX IF NOT EXISTS idx_txn_insider ON transactions (insider_cik, transaction_code);
+-- The exercise/regime EXISTS subqueries correlate on filings.filed_at and
+-- filings.cik — without these, each probe scans the whole filings table.
+CREATE INDEX IF NOT EXISTS idx_filings_filed ON filings (filed_at);
+CREATE INDEX IF NOT EXISTS idx_filings_cik ON filings (cik);
 """
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Additive column migrations for databases created by older versions
+    (CREATE TABLE IF NOT EXISTS does not alter existing tables)."""
+    for table, column, decl in (
+        ("filings", "aff_10b5_one", "INTEGER NOT NULL DEFAULT 0"),
+        ("transactions", "footnotes", "TEXT"),
+    ):
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 def connect(db_path: Path = config.DB_PATH) -> sqlite3.Connection:
@@ -89,6 +107,7 @@ def connect(db_path: Path = config.DB_PATH) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=30000")  # writers queue instead of erroring
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
 
 
@@ -104,9 +123,10 @@ def upsert_filing(conn: sqlite3.Connection, filing: dict, transactions: list[dic
     with conn:
         conn.execute(
             """INSERT OR REPLACE INTO filings
-               (accession_no, cik, company_name, ticker, filed_at, period_of_report, filing_url)
+               (accession_no, cik, company_name, ticker, filed_at, period_of_report,
+                filing_url, aff_10b5_one)
                VALUES (:accession_no, :cik, :company_name, :ticker, :filed_at,
-                       :period_of_report, :filing_url)""",
+                       :period_of_report, :filing_url, :aff_10b5_one)""",
             filing,
         )
         conn.execute(
@@ -117,12 +137,13 @@ def upsert_filing(conn: sqlite3.Connection, filing: dict, transactions: list[dic
                (accession_no, txn_seq, n_owners, is_derivative, insider_name, insider_cik,
                 is_director, is_officer, officer_title, is_ten_percent_owner,
                 transaction_date, transaction_code, acquired_disposed, shares,
-                price_per_share, value, shares_owned_after, direct_indirect, security_title)
+                price_per_share, value, shares_owned_after, direct_indirect,
+                security_title, footnotes)
                VALUES (:accession_no, :txn_seq, :n_owners, :is_derivative, :insider_name,
                        :insider_cik, :is_director, :is_officer, :officer_title,
                        :is_ten_percent_owner, :transaction_date, :transaction_code,
                        :acquired_disposed, :shares, :price_per_share, :value,
-                       :shares_owned_after, :direct_indirect, :security_title)""",
+                       :shares_owned_after, :direct_indirect, :security_title, :footnotes)""",
             transactions,
         )
         conn.executemany(

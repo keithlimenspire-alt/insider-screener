@@ -144,6 +144,64 @@ def fetch_accession(accession_no: str, path: str) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+# ------------------------------------------------------------- issuer history
+
+_OWNERSHIP_FORMS = {"3", "3/A", "4", "4/A", "5", "5/A"}
+
+
+def _cached_json(cache_file: Path, url: str, max_age_days: float) -> dict | None:
+    if not cache_file.exists() or \
+            (time.time() - cache_file.stat().st_mtime) > max_age_days * 86400:
+        try:
+            _atomic_write(cache_file, fetch(url))
+        except Exception:
+            return None
+    try:
+        return json.loads(cache_file.read_text(encoding="utf-8"))
+    except ValueError:
+        return None
+
+
+def first_insider_filing_date(cik: str, max_age_days: float = 7.0,
+                              max_archive_chunks: int = 8) -> str | None:
+    """Earliest Form 3/4/5 filing date for an issuer, from the SEC submissions
+    API (cached). Used for the V2 FPI/new-reporter heuristic: a first insider
+    filing younger than ~12 months usually means the company just converted
+    from foreign-private-issuer status and has NO insider history —
+    first-time/routine/track-record signals are meaningless there.
+
+    The API's "recent" window holds only the last 1000 filings, so archived
+    chunks are scanned oldest-first for the true earliest ownership form
+    (bounded; if the bound is hit, the earliest date seen so far is returned)."""
+    sub_dir = config.CACHE_DIR / "submissions"
+    j = _cached_json(sub_dir / f"{cik}.json",
+                     f"https://data.sec.gov/submissions/CIK{int(cik):010d}.json",
+                     max_age_days)
+    if not j:
+        return None
+    try:
+        recent = j["filings"]["recent"]
+        earliest = min((d for f, d in zip(recent["form"], recent["filingDate"])
+                        if f in _OWNERSHIP_FORMS), default=None)
+        # Archived chunks predate "recent"; the oldest chunk containing an
+        # ownership form contains the earliest one.
+        files = sorted(j["filings"].get("files") or [],
+                       key=lambda f: f.get("filingFrom", "9999"))
+        for chunk in files[:max_archive_chunks]:
+            cj = _cached_json(sub_dir / chunk["name"],
+                              f"https://data.sec.gov/submissions/{chunk['name']}",
+                              max_age_days * 4)
+            if not cj:
+                continue
+            found = min((d for f, d in zip(cj["form"], cj["filingDate"])
+                         if f in _OWNERSHIP_FORMS), default=None)
+            if found:
+                return found
+        return earliest
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 # ---------------------------------------------------------------- ticker maps
 
 def load_ticker_map(max_age_hours: float = 24.0) -> dict[str, str]:

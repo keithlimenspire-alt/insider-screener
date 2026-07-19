@@ -4,9 +4,37 @@ Personal screener for genuine **open-market insider purchases** (SEC Form 4,
 transaction code `P`, acquired, non-derivative), clustered per ticker over a
 rolling window, with the strategy's judgement and context layers on top.
 Implements all four phases of
-`Insider-Buying-Dashboard-Build-Brief-20260713-V1_1.md`.
+`Insider-Buying-Dashboard-Build-Brief-20260713-V1_1.md` plus the
+**V2 upgrade** (`Insider-Buying-Strategy-20260719-V2.md`).
 
 **Not an auto-trader.** No order execution, no exit logic — it flags candidates.
+
+## V2 strategy layer (20260719)
+
+- **Trade-type classifier (§A):** each cluster is routed **value** (down from
+  highs → discount-to-insider-entry matters) or **momentum** (near multi-year
+  highs → strength is the signal) instead of forcing one price rule globally.
+  Catalyst trades need event data the system doesn't ingest — manual call.
+- **50-day rule (§B):** value clusters are marked *actionable* only once price
+  reclaims the 50-day MA (insiders are chronically early); momentum clusters
+  are actionable by definition. It gates the badge, not the score.
+- **Market breadth gauge (§B):** rolling share of buys among *unscheduled*
+  (non-10b5-1) insider trades across the whole Form 4 firehose. ~33% is
+  normal; >33% bullish, >50% historically very bullish. Shown as a banner.
+- **Low-signal exclusions (§B):** 10b5-1 scheduled trades (checkbox or
+  footnote), DRIP/401(k)/ESPP plan buys, offering/placement patterns
+  (warrant-paired shares, or ≥3 buying units at one identical round price),
+  and below-market discounted buys (flagged). Excluded before scoring;
+  sidebar toggle to include.
+- **Refinements (§B):** regime-flip flag (only sold last year → now buying),
+  ~10% position-increase "notable" line, sell-side track record in the
+  drill-down, FPI/new-reporter badge (first insider filing <12 months →
+  first-time/routine signals suppressed as reporting-regime artifacts).
+- **Spec items that don't map cleanly (flagged per §10):** this repo never
+  contained the May-2026 "coiled-spring" system — the value branch's
+  discount-to-entry logic here is new code implementing V2's description, not
+  a port. Valuation-vs-own-5-year-range needs paid fundamentals data and is
+  not implemented; use % below high + discount-to-entry as proxies.
 
 ## Setup
 
