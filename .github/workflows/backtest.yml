@@ -1,0 +1,76 @@
+# On-demand backtest in the cloud — trigger from the GitHub mobile app or web
+# (Actions → backtest → Run workflow). Downloads the database snapshot, runs
+# the multi-year walk-forward + S-event analysis, prints the tables into the
+# run's Summary page (readable on a phone), and uploads the CSVs as artifacts.
+name: backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "Walk start (YYYY-MM-DD; empty = 2023-07-07)"
+        required: false
+        default: "2023-07-07"
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests pandas yfinance
+
+      # Price history cache persists between runs so Yahoo is only hit for
+      # missing/stale tickers (datacenter IPs get rate-limited otherwise).
+      - uses: actions/cache@v4
+        with:
+          path: data/cache/prices
+          key: prices-v2-${{ github.run_id }}
+          restore-keys: prices-v2-
+
+      - name: Download database snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p data
+          gh release download data --pattern insider.db.gz --dir data
+          gunzip -f data/insider.db.gz
+
+      - name: Walk-forward backtest + event analysis
+        run: |
+          END=$(date -d 'last friday' +%F)
+          echo "walk: ${{ inputs.start }} → $END"
+          python backtest.py "${{ inputs.start }}" "$END" 2> >(grep -v -e "possibly delisted" -e "404" -e "No data found" >&2) | tee bt.out
+          python events_analysis.py 2> >(grep -v -e "possibly delisted" -e "404" -e "No data found" >&2) | tee ev.out
+
+      - name: Publish summary
+        if: always()
+        run: |
+          {
+            echo "## Tier backtest ($(date +%F))"
+            echo '```text'
+            tail -n 80 bt.out 2>/dev/null || true
+            echo '```'
+            echo "## S-event deep dive"
+            echo '```text'
+            cat ev.out 2>/dev/null || true
+            echo '```'
+            echo "_Yahoo may refuse some tickers from datacenter IPs — those events drop out of the measurable set; counts are printed above._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backtest-results
+          path: |
+            data/backtest_snapshots.csv
+            data/backtest_s_events_full.csv
+          if-no-files-found: ignore
