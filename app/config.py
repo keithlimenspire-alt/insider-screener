@@ -105,4 +105,9 @@ DCF_TERMINAL_G = 0.025
 DCF_GROWTH_CAP = 0.15
 DCF_YEARS = 5
 DCF_UNDERVALUE_MIN = 0.30            # ≥30% below DCF fair value…
-DCF_PROMOTE_TO_S = True              # …promotes a qualifying cluster to Tier S
+DCF_PROMOTE_TO_S = False             # …promotes a cluster to Tier S. Default
+                                     # OFF: 2019-2022 train / 2023-2026 test
+                                     # showed promotion dilutes S (adds volume,
+                                     # not alpha; worst tails in dcf cells).
+                                     # The discount column + dcf-value flag
+                                     # remain visible either way.
