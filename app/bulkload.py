@@ -171,7 +171,10 @@ def load_quarter(conn, q: str, ticker_map: dict[str, str]) -> tuple[int, int]:
             "ticker": ticker, "filed_at": filed,
             "period_of_report": _date(r.PERIOD_OF_REPORT),
             "filing_url": f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_nodash}/{acc}-index.htm",
-            "aff_10b5_one": 1 if (r.AFF10B5ONE or "").strip() in ("1", "true") else 0,
+            # The 10b5-1 checkbox column only exists from 2023 on (rule
+            # change); older quarters rely on footnote text for scheduling.
+            "aff_10b5_one": 1 if str(getattr(r, "AFF10B5ONE", "") or "").strip()
+                                 in ("1", "true") else 0,
         })
         owners = owners_by_acc.get(acc) or [{
             "cik": None, "name": None, "is_director": 0, "is_officer": 0,

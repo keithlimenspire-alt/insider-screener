@@ -49,8 +49,8 @@ STALE_AFTER_DAYS = 40                # §5: no follow-through for >5–6 weeks
 NEAR_HIGH_MAX_PCT_BELOW = 15.0       # §3: within 5–15% of multi-year high
 ROUTINE_MIN_DISTINCT_MONTHS = 3      # §3: buys recurring ~monthly = routine
 ROUTINE_LOOKBACK_DAYS = 365          # …counted in the year BEFORE the window
-PRICE_HISTORY_YEARS = 6              # fetch depth (multi-year backtests need
-                                     # context years before the eval date)
+PRICE_HISTORY_YEARS = 10             # fetch depth (2019+ backtest evals need
+                                     # trailing-high context from 2016+)
 TRAILING_HIGH_DAYS = 756             # "multi-year high" = trailing ~3y of
                                      # TRADING days, windowed within the series
 PRICE_CACHE_DIR = CACHE_DIR / "prices"
@@ -97,3 +97,12 @@ TIER_PENALTIES = {
     "discounted": 2.0,    # majority of $ bought below market (a deal you can't get)
 }
 TIER_CUTOFFS = [("S", 10.0), ("A", 7.5), ("B", 5.0), ("C", 3.0)]  # below C → D
+
+# Screener-grade DCF (point-in-time via SEC XBRL). Deliberately mechanical:
+# flat discount rate, clamped historical growth, margin-of-safety promotion.
+DCF_DISCOUNT_RATE = 0.10
+DCF_TERMINAL_G = 0.025
+DCF_GROWTH_CAP = 0.15
+DCF_YEARS = 5
+DCF_UNDERVALUE_MIN = 0.30            # ≥30% below DCF fair value…
+DCF_PROMOTE_TO_S = True              # …promotes a qualifying cluster to Tier S

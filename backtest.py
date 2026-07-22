@@ -107,7 +107,7 @@ def main():
                                          as_of=d, filed_by=d)
         if cl.empty:
             continue
-        cl = classify.enrich_clusters(cl, kept, get_history=book.as_of(d))
+        cl = classify.enrich_clusters(cl, kept, get_history=book.as_of(d), as_of=d)
         cl = scoring.score_clusters(cl)
         for r in cl.itertuples():
             rows.append({
@@ -115,7 +115,8 @@ def main():
                 "company": r.company, "tier": r.tier, "score": r.score,
                 "trade_type": r.trade_type, "actionable": r.actionable,
                 "n_insiders": r.n_insiders, "role_score": r.role_score,
-                "total_value": r.total_value, "flags": r.flags,
+                "total_value": r.total_value, "dcf_discount": r.dcf_discount,
+                "flags": r.flags,
             })
         counts = cl["tier"].value_counts().to_dict()
         print(f"  {d}: {len(cl)} clusters  {counts}")

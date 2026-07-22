@@ -325,7 +325,8 @@ cols = ["tier", "score", "ticker", "company", "n_insiders", "n_filers", "n_buys"
 if "tier" not in df.columns:      # scoring runs in the block above; guard anyway
     df = scoring.score_clusters(df)
 if price_context:
-    cols[4:4] = ["trade_type", "actionable", "pct_below_high", "discount_to_entry_pct"]
+    cols[4:4] = ["trade_type", "actionable", "pct_below_high",
+                 "discount_to_entry_pct", "dcf_discount"]
 if cap_limit is not None:
     cols.insert(4, "market_cap")
 show = df[cols]
@@ -380,6 +381,14 @@ event = st.dataframe(
             help="Today's price compared with the average price the insiders "
                  "paid. Positive = you can buy cheaper than they did; negative "
                  "= the stock has already run above their entry."),
+        "dcf_discount": st.column_config.NumberColumn(
+            "DCF discount", format="percent",
+            help="How far today's price sits below a mechanical discounted-"
+                 "cash-flow fair value built from the company's own SEC-filed "
+                 "cash flows (10% discount rate, capped growth). 30%+ cheap "
+                 "promotes the cluster straight to Tier S (flagged dcf-value). "
+                 "Blank = model not applicable (negative cash flow, banks, "
+                 "missing data)."),
         "n_notable": st.column_config.NumberColumn(
             "# notable",
             help="How many buyers increased their existing stake by at least "

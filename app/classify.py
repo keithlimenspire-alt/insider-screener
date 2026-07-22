@@ -7,11 +7,12 @@ Catalyst trades need event data the system does not ingest — they are not
 auto-classified (V2 flags this as a manual call).
 """
 import logging
+from datetime import date
 from typing import Callable
 
 import pandas as pd
 
-from . import clusters, config, prices
+from . import clusters, config, fundamentals, prices
 
 log = logging.getLogger(__name__)
 
@@ -118,16 +119,26 @@ def market_context_for(ticker: str, buys: pd.DataFrame,
 
 def enrich_clusters(cl: pd.DataFrame, kept_buys: pd.DataFrame,
                     get_history: Callable = prices.get_history,
-                    progress: Callable[[float, str], None] | None = None) -> pd.DataFrame:
+                    progress: Callable[[float, str], None] | None = None,
+                    as_of: date | None = None) -> pd.DataFrame:
     """Adds the §A/§B market-context columns to a cluster frame, de-weighting
-    discounted (below-market) money in the ranking per V2 §B."""
+    discounted (below-market) money in the ranking per V2 §B, plus the
+    point-in-time DCF undervaluation (margin-of-safety gate)."""
     if cl.empty:
         return cl
+    as_of = as_of or date.today()
     rows = []
     tickers = list(cl["ticker"])
-    for i, ticker in enumerate(tickers):
-        rows.append(market_context_for(
-            ticker, kept_buys[kept_buys["ticker"] == ticker], get_history))
+    for i, (ticker, cik) in enumerate(zip(tickers, cl["cik"])):
+        ctx_row = market_context_for(
+            ticker, kept_buys[kept_buys["ticker"] == ticker], get_history)
+        try:
+            ctx_row["dcf_discount"] = fundamentals.dcf_discount(
+                str(cik), as_of, ctx_row["last_close"])
+        except Exception as e:   # a broken filing must not kill the screen
+            log.debug("dcf failed for %s: %s", ticker, e)
+            ctx_row["dcf_discount"] = None
+        rows.append(ctx_row)
         if progress:
             progress((i + 1) / len(tickers), ticker)
     ctx = pd.DataFrame(rows, index=cl.index)
