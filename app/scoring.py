@@ -56,12 +56,19 @@ def score_clusters(cl: pd.DataFrame) -> pd.DataFrame:
     out = cl.copy()
     out["score"] = s.round(2)
     out["tier"] = out["score"].map(tier_for)
-    # Margin-of-safety promotion: a cluster trading ≥DCF_UNDERVALUE_MIN below
-    # its point-in-time DCF fair value is promoted to Tier S outright.
-    if config.DCF_PROMOTE_TO_S and "dcf_discount" in out:
+    if "dcf_discount" in out:
         cheap = pd.to_numeric(out["dcf_discount"], errors="coerce") \
             >= config.DCF_UNDERVALUE_MIN
-        if cheap.any():
+        # Margin-of-safety AND-gate: an S-scored cluster that is ALSO ≥30%
+        # below DCF fair value — the only configuration positive in both the
+        # 2019-22 and 2023-26 eras (n=15; rare, ~2/year). Flagged prominently.
+        gold = cheap & (out["tier"] == "S")
+        if gold.any() and "flags" in out:
+            out.loc[gold, "flags"] = ("margin-of-safety, "
+                                      + out.loc[gold, "flags"].fillna("")
+                                      ).str.strip(", ")
+        # Optional OR-promotion (off by default — tested: adds volume, not alpha).
+        if config.DCF_PROMOTE_TO_S and cheap.any():
             out.loc[cheap, "tier"] = "S"
             if "flags" in out:
                 out.loc[cheap, "flags"] = (out.loc[cheap, "flags"].fillna("")

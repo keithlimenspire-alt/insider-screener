@@ -35,19 +35,28 @@ MENU = [
 
 
 def entries(snap_path: str, cut: float, size: float, role: float,
-            dcf: bool = False) -> list[dict]:
+            dcf=False) -> list[dict]:
+    """dcf modes: False = ignore DCF · "or"/True = DCF-cheap ALSO qualifies
+    (promotion, widens) · "and" = DCF-cheap REQUIRED on top of the score
+    (margin-of-safety gate, narrows)."""
     snap = pd.read_csv(snap_path).sort_values(["ticker", "eval_date"])
     has_dcf = "dcf_discount" in snap.columns
+    mode = "or" if dcf is True else dcf
     out, prev_ok, prev_date = [], {}, {}
     for r in snap.itertuples():
         d = date.fromisoformat(r.eval_date)
         if r.ticker in prev_date and (d - prev_date[r.ticker]).days > 9:
             prev_ok.pop(r.ticker, None)
-        cheap = (dcf and has_dcf and pd.notna(r.dcf_discount)
-                 and r.dcf_discount >= 0.30)
-        qual = r.score >= cut or cheap
+        cheap = (has_dcf and pd.notna(r.dcf_discount) and r.dcf_discount >= 0.30)
+        if mode == "and":
+            qual = r.score >= cut and cheap
+        elif mode == "or":
+            qual = r.score >= cut or cheap
+        else:
+            qual = r.score >= cut
         if qual and not prev_ok.get(r.ticker):
-            if (r.total_value >= size and r.role_score >= role) or cheap:
+            if (r.total_value >= size and r.role_score >= role) or \
+                    (mode == "or" and cheap):
                 out.append({"signal": d, "ticker": r.ticker, "score": r.score})
         prev_ok[r.ticker] = qual
         prev_date[r.ticker] = d
